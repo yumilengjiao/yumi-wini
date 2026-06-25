@@ -1,0 +1,107 @@
+//! Small helpers around the `windows` crate to keep call sites readable.
+
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindow,
+    IsWindowVisible,
+};
+use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
+
+/// Convert the last Win32 error into a readable string.
+pub fn last_error(context: &str) -> String {
+    let code = unsafe { windows::Win32::Foundation::GetLastError() };
+    format!("{context} failed: Win32 error {}", code.0)
+}
+
+/// Read a window's title (caption).
+pub fn window_title(hwnd: HWND) -> String {
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..copied.max(0) as usize])
+    }
+}
+
+/// Read a window's class name.
+pub fn window_class(hwnd: HWND) -> String {
+    unsafe {
+        let mut buf = [0u16; 256];
+        let copied = GetClassNameW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..copied.max(0) as usize])
+    }
+}
+
+/// Name of the executable that owns the window (lowercased), if it can be
+/// determined.
+pub fn window_exe(hwnd: HWND) -> String {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+
+    unsafe {
+        let mut pid = 0u32;
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd,
+            Some(&mut pid),
+        );
+        if pid == 0 {
+            return String::new();
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            windows::Win32::System::Threading::PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = windows::Win32::Foundation::CloseHandle(process);
+        if ok.is_err() {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit(['\\', '/'])
+            .next()
+            .unwrap_or("")
+            .to_lowercase()
+    }
+}
+
+/// Wrapper for `GetWindowLongPtrW` with the given index.
+pub fn get_window_long_ptr(hwnd: HWND, index: i32) -> isize {
+    unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(index)) as isize }
+}
+
+/// True while the HWND is still a valid window.
+pub fn is_alive(hwnd: HWND) -> bool {
+    unsafe { IsWindow(Some(hwnd)).as_bool() }
+}
+
+/// True if the window is visible.
+pub fn is_visible(hwnd: HWND) -> bool {
+    unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+/// Pack a pointer-sized value into `WPARAM`/`LPARAM`.
+pub fn wparam(v: usize) -> WPARAM {
+    WPARAM(v)
+}
+
+pub fn lparam(v: isize) -> LPARAM {
+    LPARAM(v)
+}
+
+/// Close an owned handle, ignoring errors.
+pub fn close_handle(handle: HANDLE) {
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
+    }
+}

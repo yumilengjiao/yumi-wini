@@ -7,6 +7,7 @@
 
 mod app;
 mod logging;
+mod win;
 
 use std::process::ExitCode;
 

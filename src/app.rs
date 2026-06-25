@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::win::window::WindowRegistry;
+
 /// Fatal, top-level error.
 #[derive(Debug)]
 pub struct AppError(String);
@@ -24,19 +26,28 @@ impl From<String> for AppError {
     }
 }
 
-pub struct App;
+pub struct App {
+    /// All top-level application windows we currently track.
+    windows: WindowRegistry,
+}
 
 impl App {
     /// Construct the application. Subsystems will be initialized here
     /// as they are implemented.
     pub fn new() -> Result<Self, AppError> {
-        Ok(App)
+        let mut windows = WindowRegistry::new();
+        let count = windows.adopt_existing();
+        log::info!("adopted {count} existing window(s) at startup");
+        Ok(App { windows })
     }
 
     /// Run the main loop. Currently a stub; will become the Win32
     /// message pump that drives event hooks, input and animations.
     pub fn run(&mut self) -> Result<(), AppError> {
-        log::info!("nothing to do yet — stub run loop");
+        log::info!(
+            "nothing to do yet — tracking {} window(s)",
+            self.windows.len()
+        );
         Ok(())
     }
 }
