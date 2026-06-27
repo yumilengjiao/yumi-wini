@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::win::events::{EventHooks, WinEvent};
+use crate::win::monitor::{self, Monitor};
 use crate::win::window::WindowRegistry;
 
 /// Fatal, top-level error.
@@ -36,6 +37,8 @@ impl From<String> for AppError {
 struct AppState {
     /// All top-level application windows we currently track.
     windows: WindowRegistry,
+    /// Current monitor topology.
+    monitors: Vec<Monitor>,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
 }
@@ -90,12 +93,27 @@ impl App {
     /// Construct the application: adopt existing windows and install
     /// WinEvent hooks on this (main) thread.
     pub fn new() -> Result<Self, AppError> {
+        let monitors = monitor::enumerate();
+        for m in &monitors {
+            log::info!(
+                "monitor {}{}: {}x{} at ({}, {}) [{}]",
+                m.device,
+                if m.is_primary { " (primary)" } else { "" },
+                m.width(),
+                m.height(),
+                m.origin().0,
+                m.origin().1,
+                m.full.bottom - m.full.top
+            );
+        }
+
         let mut windows = WindowRegistry::new();
         let count = windows.adopt_existing();
         log::info!("adopted {count} existing window(s) at startup");
 
         let state = Rc::new(RefCell::new(AppState {
             windows,
+            monitors,
             focused: None,
         }));
 
