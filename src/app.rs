@@ -11,6 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
 };
 
+use crate::layout::Layout;
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
 use crate::win::window::WindowRegistry;
@@ -39,13 +40,16 @@ struct AppState {
     windows: WindowRegistry,
     /// Current monitor topology.
     monitors: Vec<Monitor>,
+    /// The structural layout (columns/workspaces) of tracked windows.
+    layout: Layout,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
 }
 
 impl AppState {
-    /// React to a decoded WinEvent; keeps the registry in sync with
-    /// reality. The layout engine will subscribe to these changes later.
+    /// React to a decoded WinEvent; keeps the registry and layout in
+    /// sync with reality. Geometry application arrives in a later
+    /// module; for now the structure is maintained and logged.
     fn handle_event(&mut self, event: WinEvent) {
         match event {
             WinEvent::Shown(hwnd) | WinEvent::Uncloaked(hwnd) | WinEvent::MinimizeEnded(hwnd) => {
@@ -57,7 +61,8 @@ impl AppState {
                         info.title,
                         info.class
                     );
-                    self.windows.insert(info);
+                    self.windows.insert(info.clone());
+                    self.layout_add_window(hwnd);
                 }
             }
             WinEvent::Hidden(hwnd)
@@ -65,11 +70,13 @@ impl AppState {
             | WinEvent::MinimizeStarted(hwnd) => {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window hidden: \"{}\"", info.title);
+                    self.layout.remove_window(hwnd.0 as isize);
                 }
             }
             WinEvent::Destroyed(hwnd) => {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window closed: \"{}\"", info.title);
+                    self.layout.remove_window(hwnd.0 as isize);
                 }
             }
             WinEvent::Foreground(hwnd) => {
@@ -77,9 +84,27 @@ impl AppState {
                     let title = crate::win::api::window_title(hwnd);
                     log::debug!("foreground -> {title:?}");
                     self.focused = Some(hwnd);
+                    self.layout.focus_window(hwnd.0 as isize);
                 }
             }
         }
+    }
+
+    /// Place a newly tracked window into the layout of the monitor it
+    /// currently lives on.
+    fn layout_add_window(&mut self, hwnd: HWND) {
+        let id = hwnd.0 as isize;
+        let device = monitor::monitor_of_window(hwnd, &self.monitors)
+            .map(|m| m.device.clone())
+            .unwrap_or_default();
+        self.layout.add_window(&device, id);
+        log::debug!(
+            "layout: window {id} -> monitor {device}, column {}",
+            self.layout
+                .monitor(&device)
+                .map(|m| m.active_workspace().columns.len())
+                .unwrap_or(0)
+        );
     }
 }
 
@@ -96,24 +121,31 @@ impl App {
         let monitors = monitor::enumerate();
         for m in &monitors {
             log::info!(
-                "monitor {}{}: {}x{} at ({}, {}) [{}]",
+                "monitor {}{}: {}x{} at ({}, {})",
                 m.device,
                 if m.is_primary { " (primary)" } else { "" },
                 m.width(),
                 m.height(),
                 m.origin().0,
-                m.origin().1,
-                m.full.bottom - m.full.top
+                m.origin().1
             );
         }
 
         let mut windows = WindowRegistry::new();
+        let mut layout = Layout::new();
         let count = windows.adopt_existing();
-        log::info!("adopted {count} existing window(s) at startup");
+        for info in windows.iter() {
+            let device = monitor::monitor_of_window(info.hwnd, &monitors)
+                .map(|m| m.device.clone())
+                .unwrap_or_default();
+            layout.add_window(&device, info.id());
+        }
+        log::info!("adopted {count} existing window(s) into the layout at startup");
 
         let state = Rc::new(RefCell::new(AppState {
             windows,
             monitors,
+            layout,
             focused: None,
         }));
 

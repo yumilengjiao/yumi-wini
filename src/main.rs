@@ -6,6 +6,7 @@
 //! and animation — without replacing the OS compositor.
 
 mod app;
+mod layout;
 mod logging;
 mod win;
 
