@@ -28,6 +28,8 @@
 // by the input module; silence the interim dead-code warnings.
 #![allow(dead_code)]
 
+pub mod geometry;
+
 use std::collections::HashMap;
 
 /// Identity of a tracked window (the HWND pointer value).
