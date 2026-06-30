@@ -11,9 +11,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
 };
 
+use crate::layout::geometry::{self, LayoutParams};
 use crate::layout::Layout;
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
+use crate::win::placement;
 use crate::win::window::WindowRegistry;
 
 /// Fatal, top-level error.
@@ -42,6 +44,8 @@ struct AppState {
     monitors: Vec<Monitor>,
     /// The structural layout (columns/workspaces) of tracked windows.
     layout: Layout,
+    /// Layout tuning parameters (config-driven later).
+    params: LayoutParams,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
 }
@@ -63,6 +67,7 @@ impl AppState {
                     );
                     self.windows.insert(info.clone());
                     self.layout_add_window(hwnd);
+                    self.reflow();
                 }
             }
             WinEvent::Hidden(hwnd)
@@ -71,20 +76,24 @@ impl AppState {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window hidden: \"{}\"", info.title);
                     self.layout.remove_window(hwnd.0 as isize);
+                    self.reflow();
                 }
             }
             WinEvent::Destroyed(hwnd) => {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window closed: \"{}\"", info.title);
                     self.layout.remove_window(hwnd.0 as isize);
+                    self.reflow();
                 }
             }
             WinEvent::Foreground(hwnd) => {
                 if self.focused != Some(hwnd) {
-                    let title = crate::win::api::window_title(hwnd);
-                    log::debug!("foreground -> {title:?}");
                     self.focused = Some(hwnd);
-                    self.layout.focus_window(hwnd.0 as isize);
+                    let id = hwnd.0 as isize;
+                    if self.layout.focus_window(id) {
+                        self.update_focus_view(id);
+                        self.reflow();
+                    }
                 }
             }
         }
@@ -105,6 +114,43 @@ impl AppState {
                 .map(|m| m.active_workspace().columns.len())
                 .unwrap_or(0)
         );
+    }
+
+    /// Scroll the workspace owning `id` so the newly focused column is
+    /// visible (instantly for now; animations come later).
+    fn update_focus_view(&mut self, id: crate::layout::WindowId) {
+        let params = self.params.clone();
+        for m in &mut self.layout.monitors {
+            if let Some(ws_idx) = m.workspace_of(id) {
+                let Some(mon) = self.monitors.iter().find(|mon| mon.device == m.device) else {
+                    continue;
+                };
+                let view_width = (mon.width() as f64 - params.edge_padding * 2.0).max(1.0);
+                let ws = &mut m.workspaces[ws_idx];
+                geometry::refresh_view_offset(ws, &params, view_width, None);
+                return;
+            }
+        }
+    }
+
+    /// Recompute geometry for every monitor's active workspace and push
+    /// it to the real windows.
+    fn reflow(&mut self) {
+        let params = self.params.clone();
+        for mon in &self.monitors {
+            let Some(ml) = self.layout.monitor(&mon.device) else {
+                continue;
+            };
+            let area = (
+                mon.work.left as f64,
+                mon.work.top as f64,
+                (mon.work.right - mon.work.left) as f64,
+                (mon.work.bottom - mon.work.top) as f64,
+            );
+            let rects =
+                geometry::compute_workspace_geometry(ml.active_workspace(), &params, area);
+            placement::apply_geometry(&rects);
+        }
     }
 }
 
@@ -146,8 +192,12 @@ impl App {
             windows,
             monitors,
             layout,
+            params: LayoutParams::default(),
             focused: None,
         }));
+
+        // Perform the initial tiling of everything we adopted.
+        state.borrow_mut().reflow();
 
         // The hook handler shares state with the message loop via Rc.
         // Both live on the main thread, so no locking is needed.

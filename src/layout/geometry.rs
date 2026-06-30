@@ -243,6 +243,25 @@ pub fn tile_heights(ws: &Workspace, ci: usize, params: &LayoutParams, area_h: f6
     out
 }
 
+/// Recompute and store the workspace's view offset so the active
+/// column is visible. Call after any focus/placement change, before
+/// `compute_workspace_geometry`.
+pub fn refresh_view_offset(
+    ws: &mut Workspace,
+    params: &LayoutParams,
+    view_width: f64,
+    prev_idx: Option<usize>,
+) {
+    if ws.columns.is_empty() {
+        ws.view_offset = 0.0;
+        return;
+    }
+    let idx = ws.active_column_idx;
+    let widths = column_widths(ws, params, view_width);
+    let xs = column_xs(&widths, params.gaps);
+    ws.view_offset = view_offset_for_column(ws, params, view_width, &xs, &widths, idx, prev_idx);
+}
+
 /// Compute the full on-screen geometry of a workspace, in absolute
 /// screen coordinates. `area` is the monitor work rect
 /// (left, top, width, height).
