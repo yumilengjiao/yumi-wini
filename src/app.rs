@@ -15,6 +15,7 @@ use crate::layout::geometry::{self, LayoutParams};
 use crate::layout::Layout;
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
+use crate::win::msg_window::MessageWindow;
 use crate::win::placement;
 use crate::win::window::WindowRegistry;
 
@@ -48,6 +49,9 @@ struct AppState {
     params: LayoutParams,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
+    /// While the user drags/resizes this window, tiling is paused so we
+    /// don't fight the user's mouse.
+    interacting_window: Option<HWND>,
 }
 
 impl AppState {
@@ -83,6 +87,21 @@ impl AppState {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window closed: \"{}\"", info.title);
                     self.layout.remove_window(hwnd.0 as isize);
+                    self.reflow();
+                }
+            }
+            WinEvent::MoveSizeStart(hwnd) => {
+                if self.windows.contains(hwnd) {
+                    log::debug!("user interaction started on window {id}", id = hwnd.0 as isize);
+                    self.interacting_window = Some(hwnd);
+                }
+            }
+            WinEvent::MoveSizeEnd(hwnd) => {
+                if self.interacting_window == Some(hwnd) {
+                    log::debug!("user interaction ended on window {id}", id = hwnd.0 as isize);
+                    self.interacting_window = None;
+                    // Let the user's drag win for now: re-tile everything
+                    // back to the layout.
                     self.reflow();
                 }
             }
@@ -134,8 +153,12 @@ impl AppState {
     }
 
     /// Recompute geometry for every monitor's active workspace and push
-    /// it to the real windows.
+    /// it to the real windows. Paused while the user is dragging or
+    /// resizing a window.
     fn reflow(&mut self) {
+        if self.interacting_window.is_some() {
+            return;
+        }
         let params = self.params.clone();
         for mon in &self.monitors {
             let Some(ml) = self.layout.monitor(&mon.device) else {
@@ -158,6 +181,9 @@ pub struct App {
     state: Rc<RefCell<AppState>>,
     /// Keeps the WinEvent hooks alive; dropping uninstalls them.
     _hooks: EventHooks,
+    /// Hidden message-only window; the keyboard hook will post key
+    /// events here.
+    _msg_window: MessageWindow,
 }
 
 impl App {
@@ -194,6 +220,7 @@ impl App {
             layout,
             params: LayoutParams::default(),
             focused: None,
+            interacting_window: None,
         }));
 
         // Perform the initial tiling of everything we adopted.
@@ -206,7 +233,15 @@ impl App {
             handler_state.borrow_mut().handle_event(event);
         });
 
-        Ok(App { state, _hooks: hooks })
+        let msg_window = MessageWindow::new().ok_or_else(|| {
+            AppError("failed to create the message window".to_string())
+        })?;
+
+        Ok(App {
+            state,
+            _hooks: hooks,
+            _msg_window: msg_window,
+        })
     }
 
     /// Run the Win32 message loop until a quit message arrives.

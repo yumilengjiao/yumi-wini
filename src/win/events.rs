@@ -22,7 +22,8 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+    OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 /// A decoded, pre-filtered lifecycle event for one window.
@@ -44,6 +45,10 @@ pub enum WinEvent {
     MinimizeEnded(HWND),
     /// Global foreground (focus) switched to this window.
     Foreground(HWND),
+    /// The user started dragging or resizing this window.
+    MoveSizeStart(HWND),
+    /// The user finished dragging / resizing this window.
+    MoveSizeEnd(HWND),
 }
 
 /// The hooks currently installed, auto-unhooked on drop.
@@ -73,6 +78,7 @@ impl EventHooks {
             (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
             (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
             (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+            (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
         ] {
             unsafe {
                 let handle = SetWinEventHook(
@@ -152,6 +158,8 @@ fn decode(event: u32, hwnd: HWND) -> Option<WinEvent> {
         m::EVENT_SYSTEM_MINIMIZESTART => WinEvent::MinimizeStarted(hwnd),
         m::EVENT_SYSTEM_MINIMIZEEND => WinEvent::MinimizeEnded(hwnd),
         m::EVENT_SYSTEM_FOREGROUND => WinEvent::Foreground(hwnd),
+        m::EVENT_SYSTEM_MOVESIZESTART => WinEvent::MoveSizeStart(hwnd),
+        m::EVENT_SYSTEM_MOVESIZEEND => WinEvent::MoveSizeEnd(hwnd),
         _ => return None,
     };
     Some(ev)
