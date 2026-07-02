@@ -7,6 +7,7 @@
 
 mod app;
 mod layout;
+mod config;
 mod logging;
 mod win;
 

@@ -11,6 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
 };
 
+use crate::config::{self, Config};
 use crate::layout::geometry::{self, LayoutParams};
 use crate::layout::Layout;
 use crate::win::events::{EventHooks, WinEvent};
@@ -38,6 +39,9 @@ impl From<String> for AppError {
 }
 
 /// Mutable state shared between the message loop and event handlers.
+/// (The config field is consumed by the input module in the next
+/// commits.)
+#[allow(dead_code)]
 struct AppState {
     /// All top-level application windows we currently track.
     windows: WindowRegistry,
@@ -45,8 +49,10 @@ struct AppState {
     monitors: Vec<Monitor>,
     /// The structural layout (columns/workspaces) of tracked windows.
     layout: Layout,
-    /// Layout tuning parameters (config-driven later).
+    /// Layout tuning parameters (config-driven).
     params: LayoutParams,
+    /// Full configuration (binds, mod key).
+    config: Config,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
     /// While the user drags/resizes this window, tiling is paused so we
@@ -214,11 +220,14 @@ impl App {
         }
         log::info!("adopted {count} existing window(s) into the layout at startup");
 
+        let cfg = config::load();
+
         let state = Rc::new(RefCell::new(AppState {
             windows,
             monitors,
             layout,
-            params: LayoutParams::default(),
+            params: cfg.layout.clone(),
+            config: cfg,
             focused: None,
             interacting_window: None,
         }));
