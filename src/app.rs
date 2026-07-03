@@ -11,9 +11,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
 };
 
-use crate::config::{self, Config};
+use crate::config::{self, Action, Config};
+use crate::input;
 use crate::layout::geometry::{self, LayoutParams};
-use crate::layout::Layout;
+use crate::layout::{DirH, DirV, Layout};
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
 use crate::win::msg_window::MessageWindow;
@@ -158,6 +159,86 @@ impl AppState {
         }
     }
 
+    /// Execute a bound action. The navigation subset works on the
+    /// focused window's workspace.
+    fn dispatch(&mut self, action: Action) {
+        use Action::*;
+        // Find the device of the focused window (fallback: monitor
+        // under the cursor).
+        let focused_id = self
+            .focused
+            .map(|h| h.0 as isize)
+            .or_else(|| {
+                let cursor_mon = monitor::monitor_at_cursor(&self.monitors)?;
+                self.layout
+                    .monitor(&cursor_mon.device)
+                    .and_then(|m| m.active_workspace().focused_id())
+            });
+
+        let Some(id) = focused_id else { return };
+        let Some(device) = self
+            .layout
+            .monitors
+            .iter()
+            .find_map(|m| m.workspace_of(id).map(|_| m.device.clone()))
+        else {
+            return;
+        };
+
+        let mut changed = false;
+        {
+            let monitor_layout = self.layout.monitor_mut(&device).unwrap();
+            let ws = monitor_layout.active_workspace_mut();
+            match action {
+                FocusColumnLeft => changed = ws.focus_column(DirH::Left),
+                FocusColumnRight => changed = ws.focus_column(DirH::Right),
+                FocusWindowDown => changed = ws.focus_tile(DirV::Down),
+                FocusWindowUp => changed = ws.focus_tile(DirV::Up),
+                MoveColumnLeft => changed = ws.move_column(DirH::Left),
+                MoveColumnRight => changed = ws.move_column(DirH::Right),
+                MoveWindowDown => changed = ws.move_tile(DirV::Down),
+                MoveWindowUp => changed = ws.move_tile(DirV::Up),
+                MoveWindowToColumnLeft => changed = ws.move_tile_across(DirH::Left),
+                MoveWindowToColumnRight => changed = ws.move_tile_across(DirH::Right),
+                ConsumeOrExpelWindowLeft => changed = ws.consume_or_expel(DirH::Left),
+                ConsumeOrExpelWindowRight => changed = ws.consume_or_expel(DirH::Right),
+                _ => {}
+            }
+        }
+        if changed {
+            self.update_focus_view(id);
+            self.reflow();
+            self.sync_focus_to_os();
+        }
+    }
+
+    /// After a layout-driven focus change, tell the OS: raise the
+    /// focused window.
+    fn sync_focus_to_os(&mut self) {
+        let Some(device) = self
+            .focused
+            .and_then(|h| {
+                let id = h.0 as isize;
+                self.layout
+                    .monitors
+                    .iter()
+                    .find_map(|m| m.workspace_of(id).map(|_| m.device.clone()))
+            })
+            .or_else(|| {
+                monitor::monitor_at_cursor(&self.monitors).map(|m| m.device.clone())
+            })
+        else {
+            return;
+        };
+        let Some(focused_id) = self.layout.focused_id(&device) else {
+            return;
+        };
+        let hwnd = windows::Win32::Foundation::HWND(focused_id as *mut _);
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        }
+    }
+
     /// Recompute geometry for every monitor's active workspace and push
     /// it to the real windows. Paused while the user is dragging or
     /// resizing a window.
@@ -187,9 +268,11 @@ pub struct App {
     state: Rc<RefCell<AppState>>,
     /// Keeps the WinEvent hooks alive; dropping uninstalls them.
     _hooks: EventHooks,
-    /// Hidden message-only window; the keyboard hook will post key
-    /// events here.
-    _msg_window: MessageWindow,
+    /// Hidden message-only window; receives marshaled key events.
+    /// Kept alive for the process lifetime (field is deliberately
+    /// unused after construction).
+    #[allow(dead_code)]
+    msg_window: MessageWindow,
 }
 
 impl App {
@@ -242,14 +325,35 @@ impl App {
             handler_state.borrow_mut().handle_event(event);
         });
 
-        let msg_window = MessageWindow::new().ok_or_else(|| {
-            AppError("failed to create the message window".to_string())
-        })?;
+        let msg_window = MessageWindow::new()
+            .ok_or_else(|| AppError("failed to create the message window".to_string()))?;
+
+        // Keyboard: install the LL hook targeting our message window,
+        // and dispatch forwarded events to bound actions.
+        {
+            let mod_key = state.borrow().config.mod_key.clone();
+            input::install(mod_key, msg_window.hwnd())
+                .map_err(AppError::from)?;
+        }
+        let key_state = Rc::clone(&state);
+        msg_window.set_key_handler(move |ev| {
+            if !ev.pressed {
+                return;
+            }
+            let mut s = key_state.borrow_mut();
+            let action = input::action_for(&s.config.binds, &ev);
+            if let Some(action) = action {
+                log::debug!("key action: {action:?}");
+                s.dispatch(action);
+            }
+        });
+        // Compile the combo table for hook-side swallowing.
+        input::update_binds(&state.borrow().config.binds);
 
         Ok(App {
             state,
             _hooks: hooks,
-            _msg_window: msg_window,
+            msg_window,
         })
     }
 
@@ -281,6 +385,7 @@ impl App {
             "message loop exited; was tracking {} window(s)",
             state.windows.len()
         );
+        input::uninstall();
         Ok(())
     }
 }

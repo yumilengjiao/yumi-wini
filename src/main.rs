@@ -8,6 +8,7 @@
 mod app;
 mod layout;
 mod config;
+mod input;
 mod logging;
 mod win;
 
