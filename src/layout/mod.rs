@@ -72,6 +72,9 @@ pub struct Column {
     pub width: Option<ColumnWidth>,
     /// Whether the column is full-width (stretched to view edges).
     pub is_full_width: bool,
+    /// Whether the column is maximized (covers the whole monitor, no
+    /// padding, like niri's maximize-column).
+    pub is_maximized: bool,
 }
 
 impl Column {
@@ -81,6 +84,7 @@ impl Column {
             active_tile_idx: 0,
             width: None,
             is_full_width: false,
+            is_maximized: false,
         }
     }
 
@@ -391,6 +395,7 @@ impl Workspace {
                 active_tile_idx: 0,
                 width: self.columns[ci].width,
                 is_full_width: false,
+                is_maximized: false,
             };
             let at = match dir {
                 DirH::Left => ci,
@@ -402,6 +407,114 @@ impl Workspace {
             self.activate_prev_column_on_removal = None;
         }
         true
+    }
+
+    /// Niri's set-column-width: delta ("+100"/"-100"), fixed
+    /// ("1000") or proportion ("50%"). Applied to the focused column.
+    pub fn set_column_width(&mut self, spec: &SizeChange) -> bool {
+        let Some(ci) = self.columns.len().checked_sub(0).map(|_| self.active_column_idx) else {
+            return false;
+        };
+        let col = &mut self.columns[ci];
+        match spec {
+            SizeChange::Delta(px) => {
+                let new_w = match col.width {
+                    Some(ColumnWidth::Fixed(f)) => f + px,
+                    _ => px.to_owned(),
+                };
+                col.width = Some(ColumnWidth::Fixed(new_w.max(100.0)));
+            }
+            SizeChange::Fixed(px) => {
+                col.width = Some(ColumnWidth::Fixed(px.max(100.0)));
+            }
+            SizeChange::Proportion(p) => {
+                col.width = Some(ColumnWidth::Proportion(p.clamp(0.01, 1.0)));
+            }
+        }
+        col.is_full_width = false;
+        true
+    }
+
+    /// Toggle the focused column between full width and its previous
+    /// width.
+    pub fn toggle_full_width(&mut self) -> bool {
+        let Some(col) = self.columns.get_mut(self.active_column_idx) else {
+            return false;
+        };
+        col.is_full_width = !col.is_full_width;
+        true
+    }
+
+    /// Toggle the focused column between maximized (fills the monitor)
+    /// and normal. On Windows, "maximized" means covering the full
+    /// monitor rect (including taskbar) — implemented as full-width +
+    /// edge-padding removal in geometry via Column.is_full_width plus
+    /// is_maximized.
+    pub fn toggle_maximized(&mut self) -> bool {
+        let Some(col) = self.columns.get_mut(self.active_column_idx) else {
+            return false;
+        };
+        col.is_maximized = !col.is_maximized;
+        col.is_full_width = col.is_maximized;
+        true
+    }
+
+    /// Niri's set-window-height on the focused tile: adjusts the tile's
+    /// height weight or fixed height relative to the column.
+    pub fn set_window_height(&mut self, spec: &SizeChange) -> bool {
+        let Some(col) = self.columns.get_mut(self.active_column_idx) else {
+            return false;
+        };
+        let ti = col.active_tile_idx.min(col.tiles.len().saturating_sub(1));
+        let Some(tile) = col.tiles.get_mut(ti) else {
+            return false;
+        };
+        match spec {
+            SizeChange::Delta(d) => {
+                tile.height_weight = (tile.height_weight + d / 100.0).max(0.1);
+            }
+            SizeChange::Fixed(px) => {
+                // Store as weight relative to a ~800px reference column.
+                tile.height_weight = (px / 400.0).max(0.05);
+            }
+            SizeChange::Proportion(p) => {
+                tile.height_weight = p.max(0.05);
+            }
+        }
+        true
+    }
+
+    /// Focus the first or last column (niri's focus-column-first/last).
+    pub fn focus_column_edge(&mut self, edge: Edge) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+        let idx = match edge {
+            Edge::First => 0,
+            Edge::Last => self.columns.len() - 1,
+        };
+        if idx != self.active_column_idx {
+            self.active_column_idx = idx;
+            self.view_offset = 0.0;
+            self.activate_prev_column_on_removal = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Focus the window in the focused column at `index` (niri's
+    /// focus-window-in-column).
+    pub fn focus_window_in_column(&mut self, index: usize) -> bool {
+        let Some(col) = self.columns.get_mut(self.active_column_idx) else {
+            return false;
+        };
+        if index < col.tiles.len() {
+            col.active_tile_idx = index;
+            true
+        } else {
+            false
+        }
     }
 
     fn find_focused(&self) -> Option<(usize, usize)> {
@@ -423,6 +536,45 @@ pub enum DirH {
 pub enum DirV {
     Up,
     Down,
+}
+
+/// Horizontal edge for focus-column-first/last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    First,
+    Last,
+}
+
+/// A parsed size-change argument (niri's set-column-width/
+/// set-window-height syntax).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeChange {
+    /// "+100" / "-100"
+    Delta(f64),
+    /// "1000"
+    Fixed(f64),
+    /// "50%"
+    Proportion(f64),
+}
+
+impl SizeChange {
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if let Some(pct) = s.strip_suffix('%') {
+            let p: f64 = pct.trim().parse().ok()?;
+            return Some(SizeChange::Proportion(p / 100.0));
+        }
+        if let Some(delta) = s.strip_prefix('+') {
+            let d: f64 = delta.trim().parse().ok()?;
+            return Some(SizeChange::Delta(d));
+        }
+        if let Some(delta) = s.strip_prefix('-') {
+            let d: f64 = delta.trim().parse().ok()?;
+            return Some(SizeChange::Delta(-d));
+        }
+        let f: f64 = s.parse().ok()?;
+        Some(SizeChange::Fixed(f))
+    }
 }
 
 /// Per-monitor layout: a stack of workspaces, one active.
@@ -705,5 +857,57 @@ mod tests {
         assert_eq!(layout.remove_window(A), Some("DISPLAY1".to_string()));
         assert_eq!(layout.focused_id("DISPLAY1"), Some(B));
         assert_eq!(layout.remove_window(C), Some("DISPLAY2".to_string()));
+    }
+
+    #[test]
+    fn size_change_parsing() {
+        assert_eq!(SizeChange::parse("+100"), Some(SizeChange::Delta(100.0)));
+        assert_eq!(SizeChange::parse("-50"), Some(SizeChange::Delta(-50.0)));
+        assert_eq!(SizeChange::parse("1000"), Some(SizeChange::Fixed(1000.0)));
+        assert_eq!(SizeChange::parse("50%"), Some(SizeChange::Proportion(0.5)));
+        assert_eq!(SizeChange::parse("junk"), None);
+    }
+
+    #[test]
+    fn set_column_width_specs() {
+        let mut ws = Workspace::new();
+        ws.add_window(A);
+        assert!(ws.set_column_width(&SizeChange::Fixed(800.0)));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Fixed(800.0)));
+        assert!(ws.set_column_width(&SizeChange::Delta(-100.0)));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Fixed(700.0)));
+        assert!(ws.set_column_width(&SizeChange::Proportion(0.5)));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Proportion(0.5)));
+        // Full-width is reset by an explicit width.
+        ws.toggle_full_width();
+        assert!(ws.columns[0].is_full_width);
+        assert!(ws.set_column_width(&SizeChange::Fixed(600.0)));
+        assert!(!ws.columns[0].is_full_width);
+    }
+
+    #[test]
+    fn maximize_toggles_state() {
+        let mut ws = Workspace::new();
+        ws.add_window(A);
+        assert!(!ws.columns[0].is_maximized);
+        assert!(ws.toggle_maximized());
+        assert!(ws.columns[0].is_maximized);
+        assert!(ws.columns[0].is_full_width);
+        assert!(ws.toggle_maximized());
+        assert!(!ws.columns[0].is_maximized);
+    }
+
+    #[test]
+    fn focus_column_edges() {
+        let mut ws = Workspace::new();
+        for i in 1..=4 {
+            ws.add_window(i);
+        }
+        assert!(ws.focus_column_edge(Edge::First));
+        assert_eq!(ws.focused_id(), Some(1));
+        assert!(ws.focus_column_edge(Edge::Last));
+        assert_eq!(ws.focused_id(), Some(4));
+        // No-op returns false.
+        assert!(!ws.focus_column_edge(Edge::Last));
     }
 }

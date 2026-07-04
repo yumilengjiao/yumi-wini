@@ -279,20 +279,35 @@ pub fn compute_workspace_geometry(
     let vp = clamp_view_pos(view_pos(ws, &xs), &xs, &widths, view_width);
 
     // Left edge of the content area in screen coordinates.
-    let origin_x = ax + params.edge_padding;
-    let origin_y = ay + params.edge_padding;
+    let _origin_x = ax + params.edge_padding;
+    let _origin_y = ay + params.edge_padding;
 
     let mut out = Vec::new();
     for (ci, col) in ws.columns.iter().enumerate() {
-        let screen_x = origin_x + (xs[ci] - vp);
-        let heights = tile_heights(ws, ci, params, view_height);
+        let (col_x_off, col_w, col_h, col_pad) = if col.is_maximized {
+            // Maximized column: the whole work area, no padding/gaps.
+            (0.0f64, aw, ah, 0.0f64)
+        } else {
+            (xs[ci] - vp, widths[ci], view_height, 0.0)
+        };
+        let screen_x = if col.is_maximized {
+            ax
+        } else {
+            ax + params.edge_padding + col_x_off
+        };
+        let base_y = if col.is_maximized { ay } else { ay + params.edge_padding };
+        let heights = if col.is_maximized {
+            vec![(0.0, col_h)]
+        } else {
+            tile_heights(ws, ci, params, col_h)
+        };
         for (ti, &(y, h)) in heights.iter().enumerate() {
             let tile = &col.tiles[ti];
             out.push(TileRect {
                 id: tile.id,
-                x: (origin_x + (screen_x - origin_x)).round() as i32,
-                y: (origin_y + y).round() as i32,
-                w: widths[ci].round().max(1.0) as i32,
+                x: (screen_x + col_pad).round() as i32,
+                y: (base_y + y).round() as i32,
+                w: col_w.round().max(1.0) as i32,
                 h: h.round().max(1.0) as i32,
             });
         }
@@ -428,6 +443,18 @@ mod tests {
             assert_eq!(r.y, 8);
             assert_eq!(r.h, H as i32 - 16);
         }
+    }
+
+    #[test]
+    fn maximize_covers_whole_area() {
+        let mut ws = Workspace::new();
+        ws.add_window(1);
+        assert!(ws.toggle_maximized());
+        let p = params();
+        let rects = compute_workspace_geometry(&ws, &p, area());
+        assert_eq!(rects.len(), 1);
+        // Full monitor rect, no padding.
+        assert_eq!((rects[0].x, rects[0].y, rects[0].w, rects[0].h), (0, 0, W as i32, H as i32));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::config::{self, Action, Config};
 use crate::input;
 use crate::layout::geometry::{self, LayoutParams};
-use crate::layout::{DirH, DirV, Layout};
+use crate::layout::{DirH, DirV, Edge, Layout, SizeChange};
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
 use crate::win::msg_window::MessageWindow;
@@ -202,6 +202,23 @@ impl AppState {
                 MoveWindowToColumnRight => changed = ws.move_tile_across(DirH::Right),
                 ConsumeOrExpelWindowLeft => changed = ws.consume_or_expel(DirH::Left),
                 ConsumeOrExpelWindowRight => changed = ws.consume_or_expel(DirH::Right),
+                FocusColumnFirst => changed = ws.focus_column_edge(Edge::First),
+                FocusColumnLast => changed = ws.focus_column_edge(Edge::Last),
+                SetColumnWidth(spec) => {
+                    if let Some(change) = SizeChange::parse(&spec) {
+                        changed = ws.set_column_width(&change);
+                    }
+                }
+                SetWindowHeight(spec) => {
+                    if let Some(change) = SizeChange::parse(&spec) {
+                        changed = ws.set_window_height(&change);
+                    }
+                }
+                ToggleFullWidth => changed = ws.toggle_full_width(),
+                MaximizeColumn => changed = ws.toggle_maximized(),
+                CloseWindow => {
+                    self.close_window(id);
+                }
                 _ => {}
             }
         }
@@ -209,6 +226,19 @@ impl AppState {
             self.update_focus_view(id);
             self.reflow();
             self.sync_focus_to_os();
+        }
+    }
+
+    /// Close a window politely (WM_CLOSE, lets apps prompt/save).
+    fn close_window(&mut self, id: isize) {
+        let hwnd = windows::Win32::Foundation::HWND(id as *mut _);
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(hwnd),
+                windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 
