@@ -11,6 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
 };
 
+use crate::anim::Animator;
 use crate::config::{self, Action, Config};
 use crate::input;
 use crate::layout::geometry::{self, LayoutParams};
@@ -59,6 +60,8 @@ struct AppState {
     /// While the user drags/resizes this window, tiling is paused so we
     /// don't fight the user's mouse.
     interacting_window: Option<HWND>,
+    /// Window geometry animations.
+    animator: Animator,
 }
 
 impl AppState {
@@ -86,14 +89,18 @@ impl AppState {
             | WinEvent::MinimizeStarted(hwnd) => {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window hidden: \"{}\"", info.title);
-                    self.layout.remove_window(hwnd.0 as isize);
+                    let id = hwnd.0 as isize;
+                    self.layout.remove_window(id);
+                    self.animator.remove(id);
                     self.reflow();
                 }
             }
             WinEvent::Destroyed(hwnd) => {
                 if let Some(info) = self.windows.remove(hwnd) {
                     log::info!("window closed: \"{}\"", info.title);
-                    self.layout.remove_window(hwnd.0 as isize);
+                    let id = hwnd.0 as isize;
+                    self.layout.remove_window(id);
+                    self.animator.remove(id);
                     self.reflow();
                 }
             }
@@ -270,13 +277,14 @@ impl AppState {
     }
 
     /// Recompute geometry for every monitor's active workspace and push
-    /// it to the real windows. Paused while the user is dragging or
-    /// resizing a window.
+    /// it to the real windows (animated). Paused while the user is
+    /// dragging or resizing a window.
     fn reflow(&mut self) {
         if self.interacting_window.is_some() {
             return;
         }
         let params = self.params.clone();
+        let mut targets: Vec<(isize, f64, f64, f64, f64)> = Vec::new();
         for mon in &self.monitors {
             let Some(ml) = self.layout.monitor(&mon.device) else {
                 continue;
@@ -287,9 +295,26 @@ impl AppState {
                 (mon.work.right - mon.work.left) as f64,
                 (mon.work.bottom - mon.work.top) as f64,
             );
-            let rects =
-                geometry::compute_workspace_geometry(ml.active_workspace(), &params, area);
-            placement::apply_geometry(&rects);
+            for r in geometry::compute_workspace_geometry(ml.active_workspace(), &params, area) {
+                targets.push((r.id, r.x as f64, r.y as f64, r.w as f64, r.h as f64));
+            }
+        }
+        for (id, x, y, w, h) in targets {
+            self.animator.set_target(id, x, y, w, h);
+        }
+        // Kick an immediate frame so first paint is not delayed.
+        self.tick_animations();
+    }
+
+    /// Advance all animations one frame and push geometry to windows.
+    /// Called from the timer tick on the main thread.
+    fn tick_animations(&mut self) {
+        if !self.animator.is_animating() {
+            return;
+        }
+        for (id, x, y, w, h) in self.animator.tick() {
+            let rect = crate::layout::geometry::TileRect { id, x, y, w, h };
+            placement::apply_geometry(&[rect]);
         }
     }
 }
@@ -343,6 +368,7 @@ impl App {
             config: cfg,
             focused: None,
             interacting_window: None,
+            animator: Animator::new(crate::anim::AnimParams::default()),
         }));
 
         // Perform the initial tiling of everything we adopted.
@@ -377,6 +403,13 @@ impl App {
                 s.dispatch(action);
             }
         });
+        // Animation frames: tick the animator at ~60 Hz.
+        {
+            let anim_state = Rc::clone(&state);
+            msg_window.start_anim_timer(move || {
+                anim_state.borrow_mut().tick_animations();
+            });
+        }
         // Compile the combo table for hook-side swallowing.
         input::update_binds(&state.borrow().config.binds);
 

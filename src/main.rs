@@ -5,6 +5,7 @@
 //! arranges them into a scrollable column-based layout, and drives focus
 //! and animation — without replacing the OS compositor.
 
+mod anim;
 mod app;
 mod layout;
 mod config;

@@ -11,8 +11,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassW,
-    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, GWLP_USERDATA, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    SetTimer, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, GWLP_USERDATA,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
 
 use crate::input::{self, KeyEvent};
@@ -21,8 +21,13 @@ use crate::input::{self, KeyEvent};
 pub const WM_APP_KEY: u32 = 0x8000; // WM_APP
 /// Custom message: a mouse event forwarded from a hook.
 pub const WM_APP_MOUSE: u32 = 0x8001;
+/// Animation frame timer id.
+pub const TIMER_ANIM: usize = 1;
+/// Animation frame period (ms). ~60 Hz.
+pub const ANIM_TIMER_MS: u32 = 16;
 
 type KeyHandler = Box<dyn Fn(KeyEvent)>;
+type TimerHandler = Box<dyn Fn()>;
 
 /// The single instance owning the key handler; wnd_proc needs to reach
 /// it from a static context (single-threaded: all on the main thread).
@@ -30,6 +35,9 @@ type KeyHandler = Box<dyn Fn(KeyEvent)>;
 /// (banned to reference in edition 2024).
 struct HandlerCell(std::cell::UnsafeCell<Option<KeyHandler>>);
 unsafe impl Sync for HandlerCell {}
+
+struct TimerHandlerCell(std::cell::UnsafeCell<Option<TimerHandler>>);
+unsafe impl Sync for TimerHandlerCell {}
 
 impl HandlerCell {
     const fn new() -> Self {
@@ -54,6 +62,28 @@ impl HandlerCell {
 }
 
 static KEY_HANDLER: HandlerCell = HandlerCell::new();
+static TIMER_HANDLER: TimerHandlerCell = TimerHandlerCell::new();
+
+impl TimerHandlerCell {
+    const fn new() -> Self {
+        TimerHandlerCell(std::cell::UnsafeCell::new(None))
+    }
+
+    /// Safety: main thread only.
+    unsafe fn set(&self, handler: TimerHandler) {
+        unsafe { *self.0.get() = Some(handler) }
+    }
+
+    /// Safety: main thread only.
+    unsafe fn get(&self) -> Option<&TimerHandler> {
+        unsafe { (*self.0.get()).as_ref() }
+    }
+
+    /// Safety: main thread only.
+    unsafe fn take(&self) -> Option<TimerHandler> {
+        unsafe { (*self.0.get()).take() }
+    }
+}
 
 pub struct MessageWindow {
     hwnd: HWND,
@@ -111,6 +141,14 @@ impl MessageWindow {
             KEY_HANDLER.set(Box::new(handler));
         }
     }
+
+    /// Set the periodic animation tick handler and start the timer.
+    pub fn start_anim_timer(&self, handler: impl Fn() + 'static) {
+        unsafe {
+            TIMER_HANDLER.set(Box::new(handler));
+            let _ = SetTimer(Some(self.hwnd), TIMER_ANIM, ANIM_TIMER_MS, None);
+        }
+    }
 }
 
 impl Drop for MessageWindow {
@@ -136,6 +174,17 @@ extern "system" fn wnd_proc(
                 let ev = input::decode_message(wparam.0, lparam.0);
                 // Never let a panic cross the FFI boundary.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(ev)));
+            }
+        }
+        return LRESULT(0);
+    }
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_TIMER
+        && wparam.0 == TIMER_ANIM
+    {
+        unsafe {
+            if let Some(handler) = TIMER_HANDLER.get() {
+                let _ =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
             }
         }
         return LRESULT(0);
