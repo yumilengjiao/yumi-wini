@@ -16,6 +16,12 @@
 //!     center-focused-column "on-overflow"   // never | on-overflow | always
 //! }
 //!
+//! animations {
+//!     window-movement { duration-ms 250; easing "ease-out-cubic"; }
+//!     view-offset    { duration-ms 250; easing "ease-out-expo"; }
+//!     // off
+//! }
+//!
 //! binds {
 //!     Mod+Left  { focus-column-left; }
 //!     Mod+Right { focus-column-right; }
@@ -37,6 +43,7 @@
 
 use std::path::PathBuf;
 
+use crate::anim::{AnimParams, Easing};
 use crate::layout::geometry::{CenterFocused, LayoutParams};
 use crate::layout::ColumnWidth;
 
@@ -93,11 +100,40 @@ pub enum ModKey {
     Ctrl,
 }
 
+/// Animation tuning, per animation kind (niri-style `animations` node).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationsConfig {
+    /// Master switch (`animations { off; }` disables everything by
+    /// forcing zero-duration animations).
+    pub enabled: bool,
+    pub window_movement: AnimParams,
+    pub window_open: AnimParams,
+    pub view_offset: AnimParams,
+}
+
+impl Default for AnimationsConfig {
+    fn default() -> Self {
+        AnimationsConfig {
+            enabled: true,
+            window_movement: AnimParams::default(),
+            window_open: AnimParams {
+                duration: std::time::Duration::from_millis(150),
+                easing: Easing::EaseOutCubic,
+            },
+            view_offset: AnimParams {
+                duration: std::time::Duration::from_millis(250),
+                easing: Easing::EaseOutExpo,
+            },
+        }
+    }
+}
+
 /// Full configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mod_key: ModKey,
     pub layout: LayoutParams,
+    pub animations: AnimationsConfig,
     pub binds: Vec<Bind>,
 }
 
@@ -106,6 +142,7 @@ impl Default for Config {
         Config {
             mod_key: ModKey::Alt,
             layout: LayoutParams::default(),
+            animations: AnimationsConfig::default(),
             // niri's default binds (navigation subset we implement).
             binds: vec![
                 bind("Mod+Left", Action::FocusColumnLeft),
@@ -201,6 +238,7 @@ pub fn parse(source: &str) -> Result<Config, String> {
         match node.name().value() {
             "input" => parse_input(node, &mut config),
             "layout" => parse_layout(node, &mut config),
+            "animations" => parse_animations(node, &mut config),
             "binds" => parse_binds(node, &mut config),
             other => log::debug!("ignoring unknown config node {other:?}"),
         }
@@ -288,6 +326,68 @@ fn parse_width_node(n: &KdlNode) -> ColumnWidth {
         }
     }
     ColumnWidth::Proportion(0.25)
+}
+
+/// `animations { off; window-movement { duration-ms 200; easing "ease-out-expo"; } }`
+fn parse_animations(node: &KdlNode, config: &mut Config) {
+    // `animations "off";` as an argument, or `animations { off; }`
+    // as a child node — either form disables everything.
+    let off_arg = node
+        .entries()
+        .iter()
+        .any(|e| e.name().is_none() && e.value().as_string() == Some("off"));
+    let off_node = node
+        .children()
+        .is_some_and(|c| c.nodes().iter().any(|n| n.name().value() == "off"));
+    if off_arg || off_node {
+        config.animations.enabled = false;
+    }
+    let Some(doc) = node.children() else { return };
+    for n in doc.nodes() {
+        let params = match n.name().value() {
+            "window-movement" => &mut config.animations.window_movement,
+            "window-open" => &mut config.animations.window_open,
+            "view-offset" => &mut config.animations.view_offset,
+            other => {
+                log::debug!("ignoring animations node {other:?}");
+                continue;
+            }
+        };
+        let Some(children) = n.children() else { continue };
+        for c in children.nodes() {
+            match c.name().value() {
+                "duration-ms" => {
+                    if let Some(ms) = first_float_arg(c) {
+                        params.duration = std::time::Duration::from_millis(ms.max(0.0) as u64);
+                    }
+                }
+                "easing" => {
+                    if let Some(name) = first_string_arg(c) {
+                        match easing_from_name(&name) {
+                            Some(e) => params.easing = e,
+                            None => log::warn!(
+                                "unknown easing {name:?}; expected one of: linear, \
+                                 ease-out-quad, ease-out-cubic, ease-out-expo, ease-out-back"
+                            ),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Parse a niri-style easing name.
+fn easing_from_name(name: &str) -> Option<Easing> {
+    Some(match name {
+        "linear" => Easing::Linear,
+        "ease-out-quad" => Easing::EaseOutQuad,
+        "ease-out-cubic" => Easing::EaseOutCubic,
+        "ease-out-expo" => Easing::EaseOutExpo,
+        "ease-out-back" => Easing::EaseOutBack(1.70158),
+        _ => return None,
+    })
 }
 
 fn parse_binds(node: &KdlNode, config: &mut Config) {
@@ -443,6 +543,30 @@ mod tests {
         // Unknown nodes are fine.
         let cfg = parse("favorites { color \"blue\"; }").unwrap();
         assert_eq!(cfg.layout.gaps, 8.0);
+    }
+
+    #[test]
+    fn animations_config() {
+        let cfg = parse(
+            "animations {
+                window-movement { duration-ms 500; easing \"ease-out-expo\"; }
+                view-offset { duration-ms 0; }
+            }",
+        )
+        .unwrap();
+        assert!(cfg.animations.enabled);
+        assert_eq!(cfg.animations.window_movement.duration, std::time::Duration::from_millis(500));
+        assert_eq!(cfg.animations.window_movement.easing, Easing::EaseOutExpo);
+        assert_eq!(cfg.animations.view_offset.duration, std::time::Duration::ZERO);
+        // Defaults intact for untouched kinds.
+        assert_eq!(cfg.animations.window_open.duration, std::time::Duration::from_millis(150));
+
+        let cfg = parse("animations { off; }").unwrap();
+        assert!(!cfg.animations.enabled);
+
+        // Unknown easing keeps the old value (soft failure).
+        let cfg = parse("animations { window-open { easing \"bogus\"; } }").unwrap();
+        assert_eq!(cfg.animations.window_open.easing, Easing::EaseOutCubic);
     }
 
     #[test]

@@ -48,7 +48,7 @@ impl Easing {
 }
 
 /// Animation parameters, niri-ish defaults.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimParams {
     pub duration: Duration,
     pub easing: Easing,

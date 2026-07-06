@@ -360,6 +360,13 @@ impl App {
 
         let cfg = config::load();
 
+        // Animation tuning: `animations { off; }` forces zero duration,
+        // which makes every retarget land instantly.
+        let mut anim_params = cfg.animations.window_movement;
+        if !cfg.animations.enabled {
+            anim_params.duration = std::time::Duration::ZERO;
+        }
+
         let state = Rc::new(RefCell::new(AppState {
             windows,
             monitors,
@@ -368,7 +375,7 @@ impl App {
             config: cfg,
             focused: None,
             interacting_window: None,
-            animator: Animator::new(crate::anim::AnimParams::default()),
+            animator: Animator::new(anim_params),
         }));
 
         // Perform the initial tiling of everything we adopted.
