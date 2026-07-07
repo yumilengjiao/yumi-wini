@@ -107,6 +107,10 @@ pub struct Workspace {
     /// centers the active column. Positive = view scrolled right.
     /// (Geometry module interprets this.)
     pub view_offset: f64,
+    /// The windowed-fullscreen window, rendered covering the whole
+    /// monitor (niri's `toggle-windowed-fullscreen`). The layout
+    /// structure underneath stays intact.
+    pub fullscreen_id: Option<WindowId>,
     /// Niri semantics: if the active column is removed without any
     /// intermediate focus change, restore focus (and view offset) to the
     /// previously active column instead of the neighbor.
@@ -119,6 +123,7 @@ impl Workspace {
             columns: Vec::new(),
             active_column_idx: 0,
             view_offset: 0.0,
+            fullscreen_id: None,
             activate_prev_column_on_removal: None,
         }
     }
@@ -174,10 +179,29 @@ impl Workspace {
     ///   (or the prev-active column for a freshly created column),
     /// - removing a tile from the focused column keeps tile focus in
     ///   place (clamped).
+    /// Niri's `toggle-windowed-fullscreen`: the focused window is
+    /// rendered covering the whole monitor (applied by the caller's
+    /// geometry stage); the layout structure stays intact so toggling
+    /// off restores its tile exactly.
+    pub fn toggle_fullscreen(&mut self) -> bool {
+        let Some(id) = self.focused_id() else {
+            return false;
+        };
+        if self.fullscreen_id == Some(id) {
+            self.fullscreen_id = None;
+        } else {
+            self.fullscreen_id = Some(id);
+        }
+        true
+    }
+
     pub fn remove_window(&mut self, id: WindowId) -> bool {
         let Some((ci, ti)) = self.find(id) else {
             return false;
         };
+        if self.fullscreen_id == Some(id) {
+            self.fullscreen_id = None;
+        }
         let col = &mut self.columns[ci];
         col.tiles.remove(ti);
         if col.tiles.is_empty() {
@@ -895,6 +919,21 @@ mod tests {
         assert!(ws.columns[0].is_full_width);
         assert!(ws.toggle_maximized());
         assert!(!ws.columns[0].is_maximized);
+    }
+
+    #[test]
+    fn fullscreen_toggles_and_clears_on_removal() {
+        let mut ws = Workspace::new();
+        ws.add_window(A);
+        ws.add_window(B);
+        assert!(ws.toggle_fullscreen());
+        assert_eq!(ws.fullscreen_id, Some(B));
+        assert!(ws.toggle_fullscreen());
+        assert_eq!(ws.fullscreen_id, None);
+
+        ws.toggle_fullscreen(); // B fullscreen again
+        ws.remove_window(B);
+        assert_eq!(ws.fullscreen_id, None, "state cleared with the window");
     }
 
     #[test]

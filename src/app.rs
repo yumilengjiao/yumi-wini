@@ -60,6 +60,9 @@ struct AppState {
     /// While the user drags/resizes this window, tiling is paused so we
     /// don't fight the user's mouse.
     interacting_window: Option<HWND>,
+    /// Windows we stripped decorations from (windowed fullscreen);
+    /// used to restore them on exit/removal.
+    borderless: std::collections::HashSet<isize>,
     /// Window geometry animations.
     animator: Animator,
 }
@@ -92,6 +95,7 @@ impl AppState {
                     let id = hwnd.0 as isize;
                     self.layout.remove_window(id);
                     self.animator.remove(id);
+                    self.restore_borders(id);
                     self.reflow();
                 }
             }
@@ -101,6 +105,7 @@ impl AppState {
                     let id = hwnd.0 as isize;
                     self.layout.remove_window(id);
                     self.animator.remove(id);
+                    self.restore_borders(id);
                     self.reflow();
                 }
             }
@@ -193,6 +198,10 @@ impl AppState {
         };
 
         let mut changed = false;
+        // Windowed-fullscreen bookkeeping, applied after the layout
+        // borrow ends (see below).
+        let mut fullscreen_prev: Option<isize> = None;
+        let mut fullscreen_now: Option<isize> = None;
         {
             let monitor_layout = self.layout.monitor_mut(&device).unwrap();
             let ws = monitor_layout.active_workspace_mut();
@@ -223,6 +232,11 @@ impl AppState {
                 }
                 ToggleFullWidth => changed = ws.toggle_full_width(),
                 MaximizeColumn => changed = ws.toggle_maximized(),
+                ToggleWindowedFullscreen => {
+                    fullscreen_prev = ws.fullscreen_id;
+                    changed = ws.toggle_fullscreen();
+                    fullscreen_now = ws.fullscreen_id;
+                }
                 CloseWindow => {
                     self.close_window(id);
                 }
@@ -230,9 +244,32 @@ impl AppState {
             }
         }
         if changed {
+            // Apply decoration changes for windowed fullscreen.
+            if let Some(prev_id) = fullscreen_prev {
+                self.restore_borders(prev_id);
+            }
+            if let Some(cur_id) = fullscreen_now {
+                let hwnd = HWND(cur_id as *mut _);
+                if crate::win::api::is_alive(hwnd) {
+                    placement::set_borderless(hwnd, true);
+                    placement::raise(hwnd);
+                    self.borderless.insert(cur_id);
+                }
+            }
             self.update_focus_view(id);
             self.reflow();
             self.sync_focus_to_os();
+        }
+    }
+
+    /// Restore decorations on a window we borderlessed. Safe to call
+    /// for windows that no longer exist.
+    fn restore_borders(&mut self, id: isize) {
+        if self.borderless.remove(&id) {
+            let hwnd = HWND(id as *mut _);
+            if crate::win::api::is_alive(hwnd) {
+                placement::set_borderless(hwnd, false);
+            }
         }
     }
 
@@ -285,6 +322,7 @@ impl AppState {
         }
         let params = self.params.clone();
         let mut targets: Vec<(isize, f64, f64, f64, f64)> = Vec::new();
+        let mut raise_ids: Vec<isize> = Vec::new();
         for mon in &self.monitors {
             let Some(ml) = self.layout.monitor(&mon.device) else {
                 continue;
@@ -295,12 +333,35 @@ impl AppState {
                 (mon.work.right - mon.work.left) as f64,
                 (mon.work.bottom - mon.work.top) as f64,
             );
+            let fs_id = ml.active_workspace().fullscreen_id;
             for r in geometry::compute_workspace_geometry(ml.active_workspace(), &params, area) {
-                targets.push((r.id, r.x as f64, r.y as f64, r.w as f64, r.h as f64));
+                let (x, y, w, h) = if Some(r.id) == fs_id {
+                    // Windowed fullscreen: cover the whole monitor
+                    // (taskbar included), not just the work area.
+                    (
+                        mon.full.left as f64,
+                        mon.full.top as f64,
+                        (mon.full.right - mon.full.left) as f64,
+                        (mon.full.bottom - mon.full.top) as f64,
+                    )
+                } else {
+                    (r.x as f64, r.y as f64, r.w as f64, r.h as f64)
+                };
+                targets.push((r.id, x, y, w, h));
+            }
+            if let Some(fs_id) = fs_id {
+                raise_ids.push(fs_id);
             }
         }
         for (id, x, y, w, h) in targets {
             self.animator.set_target(id, x, y, w, h);
+        }
+        // The fullscreen window must cover its tile siblings.
+        for id in raise_ids {
+            let hwnd = HWND(id as *mut _);
+            if crate::win::api::is_alive(hwnd) {
+                placement::raise(hwnd);
+            }
         }
         // Kick an immediate frame so first paint is not delayed.
         self.tick_animations();
@@ -375,6 +436,7 @@ impl App {
             config: cfg,
             focused: None,
             interacting_window: None,
+            borderless: std::collections::HashSet::new(),
             animator: Animator::new(anim_params),
         }));
 

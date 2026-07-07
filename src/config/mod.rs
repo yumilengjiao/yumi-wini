@@ -171,6 +171,8 @@ impl Default for Config {
                 bind("Mod+Page_Up", Action::FocusColumnLeft),
                 bind("Mod+Home", Action::FocusColumnFirst),
                 bind("Mod+End", Action::FocusColumnLast),
+                bind("Mod+F", Action::MaximizeColumn),
+                bind("Mod+Shift+F", Action::ToggleWindowedFullscreen),
                 bind("Mod+Q", Action::CloseWindow),
                 bind("Mod+Shift+Slash", Action::ToggleOverview),
                 bind("Mod+Shift+E", Action::Quit),
