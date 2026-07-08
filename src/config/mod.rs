@@ -178,6 +178,7 @@ impl Default for Config {
                 bind("Mod+Shift+E", Action::Quit),
             ],
         }
+        .with_workspace_binds()
     }
 }
 
@@ -185,6 +186,23 @@ fn bind(combo: &str, action: Action) -> Bind {
     Bind {
         combo: combo.to_string(),
         action,
+    }
+}
+
+impl Config {
+    /// Append niri's numeric workspace binds (Mod+N / Mod+Ctrl+N).
+    fn with_workspace_binds(mut self) -> Self {
+        for n in 1..=9u8 {
+            self.binds.push(bind(
+                &format!("Mod+{n}"),
+                Action::FocusWorkspace(n),
+            ));
+            self.binds.push(bind(
+                &format!("Mod+Ctrl+{n}"),
+                Action::MoveColumnToWorkspace(n),
+            ));
+        }
+        self
     }
 }
 

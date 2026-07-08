@@ -7,9 +7,9 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowLongPtrW, SetWindowPos, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOOWNERZORDER, SWP_NOZORDER, GWL_STYLE, WINDOW_LONG_PTR_INDEX, WS_CAPTION,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE, SW_SHOW, GWL_STYLE,
+    WINDOW_LONG_PTR_INDEX, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::layout::geometry::TileRect;
@@ -65,6 +65,14 @@ pub fn raise(hwnd: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         );
+    }
+}
+
+/// Show/hide a window (windows on inactive workspaces are not
+/// rendered, exactly like niri).
+pub fn set_shown(hwnd: HWND, shown: bool) {
+    unsafe {
+        let _ = ShowWindow(hwnd, if shown { SW_SHOW } else { SW_HIDE });
     }
 }
 

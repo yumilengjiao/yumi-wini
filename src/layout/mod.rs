@@ -161,6 +161,32 @@ impl Workspace {
         self.activate_prev_column_on_removal = prev_active;
     }
 
+    /// Add several windows as one new column (for
+    /// move-column-to-workspace), focused.
+    pub fn add_column(&mut self, ids: &[WindowId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let prev_active = if self.columns.is_empty() {
+            None
+        } else {
+            Some((self.active_column_idx, self.view_offset))
+        };
+        let mut col = Column::new(ids[0]);
+        for &id in &ids[1..] {
+            col.tiles.push(Tile::new(id));
+        }
+        self.columns.push(col);
+        self.active_column_idx = self.columns.len() - 1;
+        self.view_offset = 0.0;
+        self.activate_prev_column_on_removal = prev_active;
+    }
+
+    /// All window ids in layout order.
+    pub fn window_ids(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.columns.iter().flat_map(|c| c.tiles.iter().map(|t| t.id))
+    }
+
     /// Add a window into an existing column at `column_idx` (used by
     /// absorb / move-into-column).
     pub fn add_window_to_column(&mut self, id: WindowId, column_idx: usize, tile_idx: usize) {
@@ -647,6 +673,79 @@ impl MonitorLayout {
     pub fn workspace_of(&self, id: WindowId) -> Option<usize> {
         self.window_map.get(&id).copied()
     }
+
+    /// Grow the workspace list on demand (niri-style: workspaces come
+    /// into existence when first referenced).
+    pub fn ensure_workspaces(&mut self, count: usize) {
+        while self.workspaces.len() < count {
+            self.workspaces.push(Workspace::new());
+        }
+    }
+
+    /// Switch the active workspace (niri focus-workspace), growing the
+    /// list on demand. False if already active.
+    pub fn switch_workspace(&mut self, idx: usize) -> bool {
+        if idx == self.active_workspace_idx {
+            return false;
+        }
+        self.ensure_workspaces(idx + 1);
+        self.active_workspace_idx = idx;
+        true
+    }
+
+    /// Niri move-window-to-workspace. With `focus`, the target
+    /// workspace becomes active (the window follows).
+    pub fn move_focused_window_to_workspace(
+        &mut self,
+        idx: usize,
+        focus: bool,
+    ) -> Option<WindowId> {
+        let id = self.active_workspace().focused_id()?;
+        if idx == self.active_workspace_idx {
+            return None;
+        }
+        self.ensure_workspaces(idx + 1);
+        self.active_workspace_mut().remove_window(id);
+        self.workspaces[idx].add_window(id);
+        self.window_map.insert(id, idx);
+        if focus {
+            self.active_workspace_idx = idx;
+        }
+        Some(id)
+    }
+
+    /// Niri move-column-to-workspace: the whole focused column moves as
+    /// a single column on the target workspace. Returns the moved ids.
+    pub fn move_focused_column_to_workspace(
+        &mut self,
+        idx: usize,
+        focus: bool,
+    ) -> Option<Vec<WindowId>> {
+        if idx == self.active_workspace_idx {
+            return None;
+        }
+        let ids: Vec<WindowId> = self
+            .active_workspace()
+            .columns
+            .get(self.active_workspace().active_column_idx)?
+            .tiles
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        self.ensure_workspaces(idx + 1);
+        for &id in &ids {
+            self.active_workspace_mut().remove_window(id);
+            self.window_map.insert(id, idx);
+        }
+        self.workspaces[idx].add_column(&ids);
+        if focus {
+            self.active_workspace_idx = idx;
+        }
+        Some(ids)
+    }
 }
 
 /// The whole layout: one entry per monitor.
@@ -866,6 +965,45 @@ mod tests {
         assert_eq!(ws.focused_id(), Some(B));
         // B standalone at the right edge: no right neighbor.
         assert!(!ws.consume_or_expel(DirH::Right));
+    }
+
+    #[test]
+    fn workspace_switch_and_move() {
+        let mut ml = MonitorLayout::new("DISPLAY1".into());
+        ml.add_window(A);
+        ml.add_window(B);
+
+        // Grow on demand + switch.
+        assert!(ml.switch_workspace(2));
+        assert_eq!(ml.workspaces.len(), 3);
+        assert!(ml.active_workspace().is_empty());
+        assert!(!ml.switch_workspace(2), "no-op when already active");
+
+        // Move the focused window to workspace 1 (focus follows).
+        assert_eq!(
+            ml.move_focused_window_to_workspace(1, true),
+            None,
+            "empty workspace has nothing focused"
+        );
+        assert!(ml.switch_workspace(0));
+        assert_eq!(
+            ml.move_focused_window_to_workspace(1, true),
+            Some(B)
+        );
+        assert_eq!(ml.active_workspace_idx, 1);
+        assert_eq!(ml.active_workspace().focused_id(), Some(B));
+        // A stayed behind on workspace 0.
+        assert_eq!(ml.workspaces[0].focused_id(), Some(A));
+        assert_eq!(ml.workspace_of(B), Some(1));
+
+        // Column move takes every tile of the focused column.
+        ml.move_focused_window_to_workspace(2, true);
+        ml.add_window(C); // joins workspace 2 as a new column
+        let moved = ml.move_focused_column_to_workspace(0, false).unwrap();
+        assert_eq!(moved, vec![C]);
+        assert_eq!(ml.active_workspace_idx, 2, "focus=false keeps workspace");
+        assert_eq!(ml.workspace_of(C), Some(0));
+        assert_eq!(ml.workspaces[0].columns.len(), 2, "A + C's column");
     }
 
     #[test]

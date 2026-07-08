@@ -8,7 +8,8 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
+    DispatchMessageW, GetMessageW, PostQuitMessage, PostThreadMessageW, TranslateMessage, MSG,
+    WM_QUIT,
 };
 
 use crate::anim::Animator;
@@ -237,6 +238,28 @@ impl AppState {
                     changed = ws.toggle_fullscreen();
                     fullscreen_now = ws.fullscreen_id;
                 }
+                FocusWorkspace(n) | WorkspaceSwitch(n) => {
+                    let idx = n.saturating_sub(1) as usize;
+                    changed = monitor_layout.switch_workspace(idx);
+                }
+                MoveWindowToWorkspace(n) => {
+                    let idx = n.saturating_sub(1) as usize;
+                    changed = monitor_layout
+                        .move_focused_window_to_workspace(idx, true)
+                        .is_some();
+                }
+                MoveColumnToWorkspace(n) => {
+                    let idx = n.saturating_sub(1) as usize;
+                    changed = monitor_layout
+                        .move_focused_column_to_workspace(idx, true)
+                        .is_some();
+                }
+                Spawn(cmd) => {
+                    self.spawn(&cmd);
+                }
+                Quit => {
+                    unsafe { PostQuitMessage(0) };
+                }
                 CloseWindow => {
                     self.close_window(id);
                 }
@@ -286,6 +309,38 @@ impl AppState {
         }
     }
 
+    /// Run a command (niri spawn). The first token is the executable,
+    /// the rest is passed as parameters.
+    fn spawn(&self, cmd: &str) {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let (app, args) = match cmd.split_once(' ') {
+            Some((a, rest)) => (a, Some(rest.to_string())),
+            None => (cmd, None),
+        };
+        let app = HSTRING::from(app);
+        let args = args.map(HSTRING::from);
+        let params = match &args {
+            Some(a) => windows::core::PCWSTR(a.as_ptr()),
+            None => windows::core::PCWSTR::null(),
+        };
+        let r = unsafe {
+            ShellExecuteW(
+                None,
+                None,
+                &app,
+                params,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW returns a small value (<= 32) on failure.
+        if r.0 as usize <= 32 {
+            log::warn!("spawn {cmd:?} failed (code {})", r.0 as isize);
+        }
+    }
+
     /// After a layout-driven focus change, tell the OS: raise the
     /// focused window.
     fn sync_focus_to_os(&mut self) {
@@ -323,10 +378,19 @@ impl AppState {
         let params = self.params.clone();
         let mut targets: Vec<(isize, f64, f64, f64, f64)> = Vec::new();
         let mut raise_ids: Vec<isize> = Vec::new();
+        // Windows on inactive workspaces are not rendered (niri
+        // semantics); windows on the active one must be visible.
+        let mut hide_ids: Vec<isize> = Vec::new();
+        let mut show_ids: Vec<isize> = Vec::new();
         for mon in &self.monitors {
             let Some(ml) = self.layout.monitor(&mon.device) else {
                 continue;
             };
+            for (i, ws) in ml.workspaces.iter().enumerate() {
+                if i != ml.active_workspace_idx {
+                    hide_ids.extend(ws.window_ids());
+                }
+            }
             let area = (
                 mon.work.left as f64,
                 mon.work.top as f64,
@@ -348,9 +412,24 @@ impl AppState {
                     (r.x as f64, r.y as f64, r.w as f64, r.h as f64)
                 };
                 targets.push((r.id, x, y, w, h));
+                show_ids.push(r.id);
             }
             if let Some(fs_id) = fs_id {
                 raise_ids.push(fs_id);
+            }
+        }
+        for id in hide_ids {
+            let hwnd = HWND(id as *mut _);
+            if crate::win::api::is_alive(hwnd) {
+                placement::set_shown(hwnd, false);
+            }
+            // No point animating a hidden window.
+            self.animator.remove(id);
+        }
+        for id in &show_ids {
+            let hwnd = HWND(*id as *mut _);
+            if crate::win::api::is_alive(hwnd) {
+                placement::set_shown(hwnd, true);
             }
         }
         for (id, x, y, w, h) in targets {
