@@ -8,5 +8,6 @@ pub mod api;
 pub mod events;
 pub mod monitor;
 pub mod msg_window;
+pub mod overlay;
 pub mod placement;
 pub mod window;

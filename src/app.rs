@@ -64,6 +64,8 @@ struct AppState {
     /// Windows we stripped decorations from (windowed fullscreen);
     /// used to restore them on exit/removal.
     borderless: std::collections::HashSet<isize>,
+    /// Workspace indicator overlay (also relays WM_DISPLAYCHANGE).
+    overlay: Option<crate::win::overlay::OverlayWindow>,
     /// Window geometry animations.
     animator: Animator,
 }
@@ -203,6 +205,8 @@ impl AppState {
         // borrow ends (see below).
         let mut fullscreen_prev: Option<isize> = None;
         let mut fullscreen_now: Option<isize> = None;
+        // Workspace we switched to (for the indicator overlay), if any.
+        let mut ws_switch: Option<usize> = None;
         {
             let monitor_layout = self.layout.monitor_mut(&device).unwrap();
             let ws = monitor_layout.active_workspace_mut();
@@ -241,18 +245,27 @@ impl AppState {
                 FocusWorkspace(n) | WorkspaceSwitch(n) => {
                     let idx = n.saturating_sub(1) as usize;
                     changed = monitor_layout.switch_workspace(idx);
+                    if changed {
+                        ws_switch = Some(idx);
+                    }
                 }
                 MoveWindowToWorkspace(n) => {
                     let idx = n.saturating_sub(1) as usize;
                     changed = monitor_layout
                         .move_focused_window_to_workspace(idx, true)
                         .is_some();
+                    if changed {
+                        ws_switch = Some(idx);
+                    }
                 }
                 MoveColumnToWorkspace(n) => {
                     let idx = n.saturating_sub(1) as usize;
                     changed = monitor_layout
                         .move_focused_column_to_workspace(idx, true)
                         .is_some();
+                    if changed {
+                        ws_switch = Some(idx);
+                    }
                 }
                 Spawn(cmd) => {
                     self.spawn(&cmd);
@@ -283,6 +296,67 @@ impl AppState {
             self.reflow();
             self.sync_focus_to_os();
         }
+        if let Some(idx) = ws_switch {
+            self.show_workspace_overlay(&device, idx);
+        }
+    }
+
+    /// Flash the "Workspace N" indicator on a monitor.
+    fn show_workspace_overlay(&self, device: &str, idx: usize) {
+        let Some(mon) = self.monitors.iter().find(|m| m.device == device) else {
+            return;
+        };
+        if let Some(ov) = &self.overlay {
+            ov.show_workspace(mon, idx + 1);
+        }
+    }
+
+    /// Display topology changed: re-enumerate monitors, rehome windows
+    /// from gone monitors, adopt new ones, re-tile.
+    fn on_display_change(&mut self) {
+        log::info!("display topology changed; re-enumerating monitors");
+        let new_monitors = monitor::enumerate();
+        let new_devices: Vec<String> =
+            new_monitors.iter().map(|m| m.device.clone()).collect();
+
+        let gone: Vec<String> = self
+            .monitors
+            .iter()
+            .map(|m| m.device.clone())
+            .filter(|d| !new_devices.contains(d))
+            .collect();
+        for device in gone {
+            if let Some(ml) = self.layout.remove_monitor(&device) {
+                let ids: Vec<isize> = ml
+                    .workspaces
+                    .iter()
+                    .flat_map(|ws| ws.window_ids())
+                    .collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                match self.layout.monitors.first().map(|m| m.device.clone()) {
+                    Some(target) => {
+                        log::info!(
+                            "rehoming {} window(s) from {device} to {target}",
+                            ids.len()
+                        );
+                        for id in ids {
+                            self.layout.add_window(&target, id);
+                        }
+                    }
+                    None => log::warn!(
+                        "no monitor left; {} window(s) left in place",
+                        ids.len()
+                    ),
+                }
+            }
+        }
+        for m in &new_monitors {
+            self.layout.add_monitor(&m.device);
+        }
+        self.monitors = new_monitors;
+        self.reflow();
     }
 
     /// Restore decorations on a window we borderlessed. Safe to call
@@ -507,6 +581,11 @@ impl App {
             anim_params.duration = std::time::Duration::ZERO;
         }
 
+        let overlay = crate::win::overlay::OverlayWindow::new();
+        if overlay.is_none() {
+            log::warn!("failed to create the workspace overlay window");
+        }
+
         let state = Rc::new(RefCell::new(AppState {
             windows,
             monitors,
@@ -516,6 +595,7 @@ impl App {
             focused: None,
             interacting_window: None,
             borderless: std::collections::HashSet::new(),
+            overlay,
             animator: Animator::new(anim_params),
         }));
 
@@ -556,6 +636,14 @@ impl App {
             let anim_state = Rc::clone(&state);
             msg_window.start_anim_timer(move || {
                 anim_state.borrow_mut().tick_animations();
+            });
+        }
+        // Display hotplug: WM_DISPLAYCHANGE arrives on the (top-level)
+        // overlay window and is forwarded here.
+        if let Some(ov) = state.borrow().overlay.as_ref() {
+            let dc_state = Rc::clone(&state);
+            ov.set_display_change_handler(move || {
+                dc_state.borrow_mut().on_display_change();
             });
         }
         // Compile the combo table for hook-side swallowing.
