@@ -41,6 +41,20 @@ impl From<String> for AppError {
     }
 }
 
+/// A floating window: freed from the tiling grid, placed freely.
+/// Niri remembers the floating position per window while it floats;
+/// toggling back re-tiles it.
+#[derive(Debug, Clone)]
+struct FloatState {
+    /// Which monitor / workspace the float belongs to.
+    device: String,
+    workspace_idx: usize,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 /// Mutable state shared between the message loop and event handlers.
 /// (The config field is consumed by the input module in the next
 /// commits.)
@@ -64,6 +78,8 @@ struct AppState {
     /// Windows we stripped decorations from (windowed fullscreen);
     /// used to restore them on exit/removal.
     borderless: std::collections::HashSet<isize>,
+    /// Floating windows (out of the tiling grid).
+    floating: std::collections::HashMap<isize, FloatState>,
     /// Workspace indicator overlay (also relays WM_DISPLAYCHANGE).
     overlay: Option<crate::win::overlay::OverlayWindow>,
     /// Window geometry animations.
@@ -99,6 +115,7 @@ impl AppState {
                     self.layout.remove_window(id);
                     self.animator.remove(id);
                     self.restore_borders(id);
+                    self.floating.remove(&id);
                     self.reflow();
                 }
             }
@@ -109,6 +126,7 @@ impl AppState {
                     self.layout.remove_window(id);
                     self.animator.remove(id);
                     self.restore_borders(id);
+                    self.floating.remove(&id);
                     self.reflow();
                 }
             }
@@ -122,9 +140,21 @@ impl AppState {
                 if self.interacting_window == Some(hwnd) {
                     log::debug!("user interaction ended on window {id}", id = hwnd.0 as isize);
                     self.interacting_window = None;
-                    // Let the user's drag win for now: re-tile everything
-                    // back to the layout.
-                    self.reflow();
+                    let id = hwnd.0 as isize;
+                    if let Some(fs) = self.floating.get_mut(&id) {
+                        // The user moved/resized a floating window: adopt
+                        // the new rect instead of snapping it back.
+                        if let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
+                            fs.x = x;
+                            fs.y = y;
+                            fs.w = w;
+                            fs.h = h;
+                        }
+                    } else {
+                        // Let the user's drag win for now: re-tile
+                        // everything back to the layout.
+                        self.reflow();
+                    }
                 }
             }
             WinEvent::Foreground(hwnd) => {
@@ -191,6 +221,23 @@ impl AppState {
             });
 
         let Some(id) = focused_id else { return };
+
+        // Floating windows are not in the tiling: handle the small
+        // action subset that applies to them directly.
+        if let Some(fs) = self.floating.get(&id).cloned() {
+            if matches!(action, Action::ToggleWindowFloating) {
+                self.unfloat_window(id, fs);
+            }
+            // Other tiling actions fall through to the tiling below.
+            return;
+        }
+        // Tiling -> float happens before the layout lookup too (the
+        // window leaves the layout immediately).
+        if matches!(action, Action::ToggleWindowFloating) {
+            self.float_window(id);
+            return;
+        }
+
         let Some(device) = self
             .layout
             .monitors
@@ -383,6 +430,61 @@ impl AppState {
         }
     }
 
+    /// Niri toggle-window-floating (tiling -> float): the window leaves
+    /// the layout at its current position and is placed freely.
+    fn float_window(&mut self, id: isize) {
+        let Some(device) = self.layout.remove_window(id) else {
+            return;
+        };
+        let ws_idx = self
+            .layout
+            .monitor(&device)
+            .map(|m| m.active_workspace_idx)
+            .unwrap_or(0);
+        let hwnd = HWND(id as *mut _);
+        let rect = crate::win::api::window_rect(hwnd).unwrap_or_else(|| {
+            // Fallback: centered 60% of the monitor's work area.
+            let mon = self
+                .monitors
+                .iter()
+                .find(|m| m.device == device)
+                .or_else(|| self.monitors.first());
+            match mon {
+                Some(m) => {
+                    let w = (m.work.right - m.work.left) as f64 * 0.6;
+                    let h = (m.work.bottom - m.work.top) as f64 * 0.6;
+                    let x = m.work.left as f64 + ((m.work.right - m.work.left) as f64 - w) / 2.0;
+                    let y = m.work.top as f64 + ((m.work.bottom - m.work.top) as f64 - h) / 2.0;
+                    (x, y, w, h)
+                }
+                None => (100.0, 100.0, 800.0, 600.0),
+            }
+        });
+        self.floating.insert(
+            id,
+            FloatState {
+                device: device.clone(),
+                workspace_idx: ws_idx,
+                x: rect.0,
+                y: rect.1,
+                w: rect.2,
+                h: rect.3,
+            },
+        );
+        self.animator.set_target(id, rect.0, rect.1, rect.2, rect.3);
+        // Close the gap in the tiling.
+        self.reflow();
+    }
+
+    /// Niri toggle-window-floating (float -> tiling): back into the
+    /// layout at the focused position.
+    fn unfloat_window(&mut self, id: isize, fs: FloatState) {
+        self.floating.remove(&id);
+        self.layout.add_window(&fs.device, id);
+        self.reflow();
+        self.sync_focus_to_os();
+    }
+
     /// Run a command (niri spawn). The first token is the executable,
     /// the rest is passed as parameters.
     fn spawn(&self, cmd: &str) {
@@ -492,6 +594,35 @@ impl AppState {
                 raise_ids.push(fs_id);
             }
         }
+        // Floating windows: placed freely on their workspace, above
+        // the tiles.
+        let floats: Vec<(isize, f64, f64, f64, f64, bool)> = self
+            .floating
+            .iter()
+            .map(|(id, fs)| {
+                let visible = self
+                    .layout
+                    .monitor(&fs.device)
+                    .map(|ml| ml.active_workspace_idx == fs.workspace_idx)
+                    .unwrap_or(false);
+                (*id, fs.x, fs.y, fs.w, fs.h, visible)
+            })
+            .collect();
+        for (id, x, y, w, h, visible) in floats {
+            let hwnd = HWND(id as *mut _);
+            if !visible {
+                if crate::win::api::is_alive(hwnd) {
+                    placement::set_shown(hwnd, false);
+                }
+                self.animator.remove(id);
+            } else {
+                if crate::win::api::is_alive(hwnd) {
+                    placement::set_shown(hwnd, true);
+                    placement::raise(hwnd);
+                }
+                self.animator.set_target(id, x, y, w, h);
+            }
+        }
         for id in hide_ids {
             let hwnd = HWND(id as *mut _);
             if crate::win::api::is_alive(hwnd) {
@@ -595,6 +726,7 @@ impl App {
             focused: None,
             interacting_window: None,
             borderless: std::collections::HashSet::new(),
+            floating: std::collections::HashMap::new(),
             overlay,
             animator: Animator::new(anim_params),
         }));

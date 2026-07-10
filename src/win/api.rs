@@ -1,12 +1,24 @@
 //! Small helpers around the `windows` crate to keep call sites readable.
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindow,
-    IsWindowVisible,
+    GetClassNameW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    IsWindow, IsWindowVisible,
 };
 use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
+
+/// Window rect as (x, y, w, h) in screen coordinates.
+pub fn window_rect(hwnd: HWND) -> Option<(f64, f64, f64, f64)> {
+    let mut rc = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rc).ok()? };
+    Some((
+        rc.left as f64,
+        rc.top as f64,
+        (rc.right - rc.left) as f64,
+        (rc.bottom - rc.top) as f64,
+    ))
+}
 
 /// Convert the last Win32 error into a readable string.
 pub fn last_error(context: &str) -> String {

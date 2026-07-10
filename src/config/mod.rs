@@ -173,6 +173,7 @@ impl Default for Config {
                 bind("Mod+End", Action::FocusColumnLast),
                 bind("Mod+F", Action::MaximizeColumn),
                 bind("Mod+Shift+F", Action::ToggleWindowedFullscreen),
+                bind("Mod+V", Action::ToggleWindowFloating),
                 bind("Mod+Q", Action::CloseWindow),
                 bind("Mod+Shift+Slash", Action::ToggleOverview),
                 bind("Mod+Shift+E", Action::Quit),
