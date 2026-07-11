@@ -224,9 +224,73 @@ impl AppState {
 
         // Floating windows are not in the tiling: handle the small
         // action subset that applies to them directly.
-        if let Some(fs) = self.floating.get(&id).cloned() {
+        if self.floating.contains_key(&id) {
             if matches!(action, Action::ToggleWindowFloating) {
+                let fs = self.floating.get(&id).cloned().unwrap();
                 self.unfloat_window(id, fs);
+                return;
+            }
+            // Map a few tiling actions to float move/resize.
+            let mut touched = false;
+            if let Some(fs) = self.floating.get_mut(&id) {
+                const STEP: f64 = 50.0;
+                match action {
+                    Action::MoveColumnLeft => {
+                        fs.x -= STEP;
+                        touched = true;
+                    }
+                    Action::MoveColumnRight => {
+                        fs.x += STEP;
+                        touched = true;
+                    }
+                    Action::MoveWindowUp => {
+                        fs.y -= STEP;
+                        touched = true;
+                    }
+                    Action::MoveWindowDown => {
+                        fs.y += STEP;
+                        touched = true;
+                    }
+                    Action::SetColumnWidth(spec) => {
+                        if let Some(change) = SizeChange::parse(&spec) {
+                            match change {
+                                SizeChange::Delta(d) => fs.w = (fs.w + d).max(100.0),
+                                SizeChange::Fixed(f) => fs.w = f.max(100.0),
+                                SizeChange::Proportion(p) => {
+                                    fs.w = (fs.w * p.clamp(0.05, 20.0)).max(100.0)
+                                }
+                            }
+                            touched = true;
+                        }
+                    }
+                    Action::SetWindowHeight(spec) => {
+                        if let Some(change) = SizeChange::parse(&spec) {
+                            match change {
+                                SizeChange::Delta(d) => fs.h = (fs.h + d).max(100.0),
+                                SizeChange::Fixed(f) => fs.h = f.max(100.0),
+                                SizeChange::Proportion(p) => {
+                                    fs.h = (fs.h * p.clamp(0.05, 20.0)).max(100.0)
+                                }
+                            }
+                            touched = true;
+                        }
+                    }
+                    _ => {}
+                }
+                // Keep at least 100 px of the float on its monitor.
+                if touched {
+                    if let Some(m) = self.monitors.iter().find(|m| m.device == fs.device) {
+                        fs.x = fs
+                            .x
+                            .clamp(m.work.left as f64 - fs.w + 100.0, m.work.right as f64 - 100.0);
+                        fs.y = fs
+                            .y
+                            .clamp(m.work.top as f64 - fs.h + 100.0, m.work.bottom as f64 - 100.0);
+                    }
+                }
+            }
+            if touched {
+                self.reflow();
             }
             // Other tiling actions fall through to the tiling below.
             return;
