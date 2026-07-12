@@ -75,6 +75,9 @@ struct AppState {
     /// While the user drags/resizes this window, tiling is paused so we
     /// don't fight the user's mouse.
     interacting_window: Option<HWND>,
+    /// Window rect when the current interaction started, used to tell
+    /// real drags apart from clicks and accidental nudges.
+    interact_start_rect: Option<(f64, f64, f64, f64)>,
     /// Windows we stripped decorations from (windowed fullscreen);
     /// used to restore them on exit/removal.
     borderless: std::collections::HashSet<isize>,
@@ -134,6 +137,7 @@ impl AppState {
                 if self.windows.contains(hwnd) {
                     log::debug!("user interaction started on window {id}", id = hwnd.0 as isize);
                     self.interacting_window = Some(hwnd);
+                    self.interact_start_rect = crate::win::api::window_rect(hwnd);
                 }
             }
             WinEvent::MoveSizeEnd(hwnd) => {
@@ -151,9 +155,9 @@ impl AppState {
                             fs.h = h;
                         }
                     } else {
-                        // Let the user's drag win for now: re-tile
-                        // everything back to the layout.
-                        self.reflow();
+                        // Tiled window: interpret the drag as a niri-style
+                        // drag-and-drop reorder (or a cross-monitor move).
+                        self.handle_tiled_drag_end(hwnd);
                     }
                 }
             }
@@ -494,6 +498,167 @@ impl AppState {
         }
     }
 
+    /// A drag of a *tiled* window ended at the current cursor position:
+    /// reorder niri-style (drag-and-drop). Dropping in the gap between
+    /// columns creates a standalone column there (keeping its width);
+    /// dropping onto a column's span inserts the window into that
+    /// column's tile stack at the height the cursor points at; dropping
+    /// on another monitor moves the window to that output.
+    fn handle_tiled_drag_end(&mut self, hwnd: HWND) {
+        let id = hwnd.0 as isize;
+
+        // Tell real drags apart from clicks / tiny nudges: only a
+        // meaningful position change triggers a reorder.
+        let start = self.interact_start_rect.take();
+        if let (Some(s), Some(e)) = (start, crate::win::api::window_rect(hwnd))
+            && (s.0 - e.0).abs() < 10.0
+            && (s.1 - e.1).abs() < 10.0
+        {
+            self.reflow();
+            return;
+        }
+
+        let Some((cx, cy)) = crate::win::api::cursor_pos() else {
+            self.reflow();
+            return;
+        };
+
+        // Where the window came from.
+        let Some(source_device) = self
+            .layout
+            .monitors
+            .iter()
+            .find_map(|m| m.workspace_of(id).map(|_| m.device.clone()))
+        else {
+            self.reflow();
+            return;
+        };
+
+        // Cross-monitor drag: move to the drop monitor's active
+        // workspace as a new column (niri moves windows between
+        // outputs this way).
+        let drop_device = monitor::monitor_at_cursor(&self.monitors)
+            .map(|m| m.device.clone())
+            .unwrap_or_else(|| source_device.clone());
+        if drop_device != source_device {
+            log::info!("drag: window {id} moved to monitor {drop_device}");
+            self.layout.remove_window(id);
+            self.layout.add_window(&drop_device, id);
+            self.reflow();
+            return;
+        }
+
+        // Capture the on-screen geometry *before* removing the window:
+        // reflow was paused during the drag, so these rects match what
+        // the user sees. The dragged window's own rects are skipped, so
+        // a column that only held it is not a drop target.
+        let params = self.params.clone();
+        let Some(mon) = self.monitors.iter().find(|m| m.device == source_device) else {
+            self.reflow();
+            return;
+        };
+        let area = (
+            mon.work.left as f64,
+            mon.work.top as f64,
+            (mon.work.right - mon.work.left) as f64,
+            (mon.work.bottom - mon.work.top) as f64,
+        );
+        let Some(ml) = self.layout.monitor(&source_device) else {
+            self.reflow();
+            return;
+        };
+        let fullscreen_drag = ml.active_workspace().fullscreen_id == Some(id);
+        // Windowed-fullscreen windows are not part of the visible tile
+        // grid; dragging one just snaps it back.
+        if fullscreen_drag {
+            self.reflow();
+            return;
+        }
+        let ws = ml.active_workspace();
+        let rects = geometry::compute_workspace_geometry(ws, &params, area);
+        let mut col_rects: Vec<Vec<geometry::TileRect>> = vec![Vec::new(); ws.columns.len()];
+        for r in rects {
+            if r.id == id {
+                continue;
+            }
+            if let Some((ci, _)) = ws.find(r.id) {
+                col_rects[ci].push(r);
+            }
+        }
+        // Keep the column width for a standalone re-insertion.
+        let old_width = ws.find(id).and_then(|(ci, _)| ws.columns[ci].width);
+
+        // Decide the drop from the cursor position:
+        // - inside a column's span (plus half a gap): into that column,
+        //   at the tile slot the cursor points at (remembered via the
+        //   anchor tile it lands on, so index shifts after the removal
+        //   don't matter);
+        // - otherwise: a standalone column right after the last column
+        //   fully left of the cursor.
+        let gap = params.gaps;
+        let mut into: Option<(isize, bool)> = None; // (anchor tile, insert after it?)
+        let mut left_of: Option<isize> = None; // anchor of the last column left of the cursor
+        for rects in &col_rects {
+            let Some(first) = rects.first() else { continue };
+            let (x, w) = (first.x as f64, first.w as f64);
+            let left = x - gap / 2.0;
+            let right = x + w + gap / 2.0;
+            if cx >= left && cx < right {
+                let mut slot = rects.len();
+                for (i, r) in rects.iter().enumerate() {
+                    if cy < r.y as f64 + r.h as f64 / 2.0 {
+                        slot = i;
+                        break;
+                    }
+                }
+                let (anchor, after) = if slot < rects.len() {
+                    (rects[slot].id, false)
+                } else {
+                    (rects[rects.len() - 1].id, true)
+                };
+                into = Some((anchor, after));
+                break;
+            }
+            if cx >= right {
+                left_of = Some(first.id);
+            }
+        }
+
+        // Apply: remove, then re-insert at the resolved position.
+        let Some(ml) = self.layout.monitor_mut(&source_device) else {
+            self.reflow();
+            return;
+        };
+        ml.active_workspace_mut().remove_window(id);
+        let ws = ml.active_workspace_mut();
+        match into {
+            Some((anchor, after)) => {
+                if let Some((ci, ti)) = ws.find(anchor) {
+                    let tile_idx = if after { ti + 1 } else { ti };
+                    ws.add_window_to_column(id, ci, tile_idx);
+                } else {
+                    ws.insert_column_at(ws.columns.len(), id);
+                }
+            }
+            None => {
+                let idx = left_of
+                    .and_then(|anchor| ws.find(anchor).map(|(ci, _)| ci + 1))
+                    .unwrap_or(0);
+                ws.insert_column_at(idx, id);
+                // A standalone drop keeps the dragged column's width.
+                if let Some(w) = old_width
+                    && let Some(col) = ws.columns.get_mut(idx)
+                {
+                    col.width = Some(w);
+                }
+            }
+        }
+        log::debug!("drag: window {id} reordered on {source_device}");
+        self.update_focus_view(id);
+        self.reflow();
+        self.sync_focus_to_os();
+    }
+
     /// Niri toggle-window-floating (tiling -> float): the window leaves
     /// the layout at its current position and is placed freely.
     fn float_window(&mut self, id: isize) {
@@ -789,6 +954,7 @@ impl App {
             config: cfg,
             focused: None,
             interacting_window: None,
+            interact_start_rect: None,
             borderless: std::collections::HashSet::new(),
             floating: std::collections::HashMap::new(),
             overlay,

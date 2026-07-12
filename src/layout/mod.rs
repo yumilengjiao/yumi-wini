@@ -187,6 +187,16 @@ impl Workspace {
         self.columns.iter().flat_map(|c| c.tiles.iter().map(|t| t.id))
     }
 
+    /// Insert a window as a new column at `idx` (drag-and-drop between
+    /// columns). Clamped to the valid range; focuses the new column.
+    pub fn insert_column_at(&mut self, idx: usize, id: WindowId) {
+        let idx = idx.min(self.columns.len());
+        self.columns.insert(idx, Column::new(id));
+        self.active_column_idx = idx;
+        self.view_offset = 0.0;
+        self.activate_prev_column_on_removal = None;
+    }
+
     /// Add a window into an existing column at `column_idx` (used by
     /// absorb / move-into-column).
     pub fn add_window_to_column(&mut self, id: WindowId, column_idx: usize, tile_idx: usize) {
@@ -1072,6 +1082,36 @@ mod tests {
         ws.toggle_fullscreen(); // B fullscreen again
         ws.remove_window(B);
         assert_eq!(ws.fullscreen_id, None, "state cleared with the window");
+    }
+
+    #[test]
+    fn insert_column_at_positions_and_focuses() {
+        let mut ws = Workspace::new();
+        ws.add_window(A);
+        ws.add_window(B);
+        ws.add_window(C); // C focused
+        // Drag A to the right of C.
+        ws.remove_window(A);
+        ws.insert_column_at(2, A);
+        assert_eq!(
+            ws.columns.iter().map(|c| c.focused_id()).collect::<Vec<_>>(),
+            vec![Some(B), Some(C), Some(A)]
+        );
+        assert_eq!(ws.focused_id(), Some(A));
+        // Out-of-range index is clamped to the end.
+        ws.remove_window(A);
+        ws.insert_column_at(99, A);
+        assert_eq!(ws.columns.len(), 3);
+        assert_eq!(ws.focused_id(), Some(A));
+        // Drop into the middle of a column at a tile slot.
+        ws.remove_window(A);
+        ws.add_window_to_column(A, 0, 1); // between B and C's column
+        assert_eq!(ws.columns.len(), 2);
+        assert_eq!(
+            ws.columns[0].tiles.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![B, A]
+        );
+        assert_eq!(ws.focused_id(), Some(A));
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! Small helpers around the `windows` crate to keep call sites readable.
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    IsWindow, IsWindowVisible,
+    GetClassNameW, GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsWindow, IsWindowVisible,
 };
 use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
 
@@ -18,6 +18,13 @@ pub fn window_rect(hwnd: HWND) -> Option<(f64, f64, f64, f64)> {
         (rc.right - rc.left) as f64,
         (rc.bottom - rc.top) as f64,
     ))
+}
+
+/// Current cursor position in screen coordinates.
+pub fn cursor_pos() -> Option<(f64, f64)> {
+    let mut pt = POINT::default();
+    unsafe { GetCursorPos(&mut pt).ok()? };
+    Some((pt.x as f64, pt.y as f64))
 }
 
 /// Convert the last Win32 error into a readable string.
