@@ -6,8 +6,12 @@
 //! `PostMessage` to our hidden window (`WM_APP_KEY`).
 //!
 //! Combo syntax matches niri: `Mod+Shift+H`, `Mod+Left`, `Mod+Q`.
-//! Key names are XKB-ish (`H`, `Left`, `Page_Up`, `Return`, `space`).
+//! Key names are XKB-ish (`H`, `Left`, `Page_Up`, `Return`, `space`),
+//! plus the niri mouse-scroll pseudo-keys (`WheelScrollDown`, ...).
 
+pub mod mouse;
+
+pub use mouse::{MouseEvent, MouseKind};
 
 use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicUsize;
@@ -24,6 +28,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::config::{Action, Bind, ModKey};
 use crate::win::msg_window::WM_APP_KEY;
+
+/// Pseudo virtual-key codes for mouse-wheel scroll directions (niri's
+/// WheelScroll* keys; bindable like any key).
+pub const VK_WHEEL_DOWN: u32 = 0xE1;
+pub const VK_WHEEL_UP: u32 = 0xE2;
+pub const VK_WHEEL_LEFT: u32 = 0xE3;
+pub const VK_WHEEL_RIGHT: u32 = 0xE4;
 
 /// A key event forwarded from the hook thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +90,10 @@ impl KeyEvent {
             0xA3 => "Control_R".into(),
             0xA4 => "Alt_L".into(),
             0xA5 => "Alt_R".into(),
+            VK_WHEEL_DOWN => "WheelScrollDown".into(),
+            VK_WHEEL_UP => "WheelScrollUp".into(),
+            VK_WHEEL_LEFT => "WheelScrollLeft".into(),
+            VK_WHEEL_RIGHT => "WheelScrollRight".into(),
             _ => {
                 // Letters/digits: their ASCII name.
                 let c = vk as u8;
@@ -114,7 +129,7 @@ static HOOK_HANDLE_PTR: AtomicUsize = AtomicUsize::new(0);
 /// `[ vk:32 | shift:1 | ctrl:1 | mod:1 ]` (packed low 35 bits).
 pub fn install(mod_key: ModKey, target: HWND) -> Result<(), String> {
     *HOOK_STATE.lock().unwrap() = Some(HookState {
-        mod_key,
+        mod_key: mod_key.clone(),
         target: target.0 as isize,
     });
 
@@ -124,6 +139,9 @@ pub fn install(mod_key: ModKey, target: HWND) -> Result<(), String> {
         HOOK_HANDLE_PTR.store(hook.0 as usize, Ordering::SeqCst);
     }
     log::info!("keyboard hook installed");
+    // Mouse: wheel binds + optional focus-follows-mouse. Installed on
+    // the same thread (LL hooks are dispatched by our message loop).
+    mouse::install(mod_key.clone(), target)?;
     Ok(())
 }
 
@@ -138,6 +156,7 @@ pub fn uninstall() {
         }
         log::info!("keyboard hook removed");
     }
+    mouse::uninstall();
     *HOOK_STATE.lock().unwrap() = None;
 }
 
@@ -250,7 +269,7 @@ pub fn update_binds(binds: &[Bind]) {
     log::debug!("hook now matching {} combos", combos.len());
 }
 
-fn matches_a_bind(vk: u32, shift: bool, ctrl: bool, mod_held: bool) -> bool {
+pub(crate) fn matches_a_bind(vk: u32, shift: bool, ctrl: bool, mod_held: bool) -> bool {
     let name = KeyEvent::key_name(vk);
     let combos = MATCHING_COMBOS.lock().unwrap();
     combos.iter().any(|c| {
@@ -289,6 +308,27 @@ pub fn decode_message(wparam: usize, lparam: isize) -> KeyEvent {
         shift: (packed >> 32) & 1 == 1,
         ctrl: (packed >> 33) & 1 == 1,
         mod_held: (packed >> 34) & 1 == 1,
+    }
+}
+
+/// Decode a `WM_APP_MOUSE` wparam/lparam pair back into a MouseEvent.
+/// (Encoding lives in `input::mouse`.)
+pub fn decode_mouse_message(wparam: usize, lparam: isize) -> MouseEvent {
+    let w = wparam;
+    let kind = match w & 0b11 {
+        0 => MouseKind::Move,
+        1 => MouseKind::WheelV,
+        _ => MouseKind::WheelH,
+    };
+    let packed = lparam as u64;
+    MouseEvent {
+        kind,
+        x: (packed >> 32) as u32 as i32,
+        y: packed as u32 as i32,
+        notches: ((w >> 16) as u8) as i8 as i32,
+        shift: w & 0b0100 != 0,
+        ctrl: w & 0b1000 != 0,
+        mod_held: w & 0b1_0000 != 0,
     }
 }
 

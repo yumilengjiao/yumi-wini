@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::anim::Animator;
 use crate::config::{self, Action, Config};
-use crate::input;
+use crate::input::{self, KeyEvent, MouseKind};
 use crate::layout::geometry::{self, LayoutParams};
 use crate::layout::{DirH, DirV, Edge, Layout, SizeChange};
 use crate::win::events::{EventHooks, WinEvent};
@@ -204,6 +204,78 @@ impl AppState {
                 let ws = &mut m.workspaces[ws_idx];
                 geometry::refresh_view_offset(ws, &params, view_width, None);
                 return;
+            }
+        }
+    }
+
+    /// Handle a mouse event forwarded by the low-level hook:
+    /// - wheel events act as niri-style `WheelScroll*` key binds
+    ///   (default `Mod+Wheel` moves column focus, scrolling the view),
+    /// - moves drive the optional focus-follows-mouse mode.
+    fn handle_mouse_event(&mut self, ev: input::MouseEvent) {
+        match ev.kind {
+            MouseKind::WheelV | MouseKind::WheelH => {
+                let Some(vk) = ev.wheel_vk() else { return };
+                let key_ev = KeyEvent {
+                    vk,
+                    pressed: true,
+                    shift: ev.shift,
+                    ctrl: ev.ctrl,
+                    mod_held: ev.mod_held,
+                };
+                if let Some(action) = input::action_for(&self.config.binds, &key_ev) {
+                    log::debug!("wheel action: {action:?}");
+                    self.dispatch(action);
+                }
+            }
+            MouseKind::Move => {
+                if self.config.focus_follows_mouse {
+                    self.focus_follows_mouse(ev.x, ev.y);
+                }
+            }
+        }
+    }
+
+    /// Niri's focus-follows-mouse: hovering a managed window focuses
+    /// it (layout focus + OS foreground). Skipped while the user is
+    /// dragging/resizing, and only applies to windows that are actually
+    /// visible (active workspace tiles and visible floats).
+    fn focus_follows_mouse(&mut self, x: i32, y: i32) {
+        if self.interacting_window.is_some() {
+            return;
+        }
+        let Some(hwnd) = crate::win::api::root_window_at(x, y) else {
+            return;
+        };
+        if !self.windows.contains(hwnd) || self.focused == Some(hwnd) {
+            return;
+        }
+        let id = hwnd.0 as isize;
+        let visible_tiled = self.layout.monitors.iter().any(|m| {
+            m.workspace_of(id)
+                .is_some_and(|ws| ws == m.active_workspace_idx)
+        });
+        let visible_float = self
+            .floating
+            .get(&id)
+            .and_then(|fs| {
+                self.layout
+                    .monitor(&fs.device)
+                    .map(|ml| ml.active_workspace_idx == fs.workspace_idx)
+            })
+            .unwrap_or(false);
+        if !visible_tiled && !visible_float {
+            return;
+        }
+        if self.layout.focus_window(id) {
+            self.focused = Some(hwnd);
+            self.update_focus_view(id);
+            self.reflow();
+            // Real focus follows too (Windows couples focus and
+            // foreground; failing is harmless, e.g. foreground lock).
+            unsafe {
+                let _ =
+                    windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
             }
         }
     }
@@ -980,6 +1052,13 @@ impl App {
             let mod_key = state.borrow().config.mod_key.clone();
             input::install(mod_key, msg_window.hwnd())
                 .map_err(AppError::from)?;
+        }
+        // Mouse: wheel binds + optional focus-follows-mouse.
+        {
+            let mouse_state = Rc::clone(&state);
+            msg_window.set_mouse_handler(move |ev| {
+                mouse_state.borrow_mut().handle_mouse_event(ev);
+            });
         }
         let key_state = Rc::clone(&state);
         msg_window.set_key_handler(move |ev| {

@@ -7,6 +7,7 @@
 //!     keyboard-shortcuts {
 //!         Mod="Alt"   // which physical key acts as the Mod key
 //!     }
+//!     // focus-follows-mouse   // hovering a window focuses it
 //! }
 //!
 //! layout {
@@ -132,6 +133,9 @@ impl Default for AnimationsConfig {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mod_key: ModKey,
+    /// `input { focus-follows-mouse; }` — hovering a window focuses it
+    /// (niri's optional hover focus).
+    pub focus_follows_mouse: bool,
     pub layout: LayoutParams,
     pub animations: AnimationsConfig,
     pub binds: Vec<Bind>,
@@ -141,6 +145,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             mod_key: ModKey::Alt,
+            focus_follows_mouse: false,
             layout: LayoutParams::default(),
             animations: AnimationsConfig::default(),
             // niri's default binds (navigation subset we implement).
@@ -169,6 +174,12 @@ impl Default for Config {
                 bind("Mod+Ctrl+K", Action::ConsumeOrExpelWindowRight),
                 bind("Mod+Page_Down", Action::FocusColumnRight),
                 bind("Mod+Page_Up", Action::FocusColumnLeft),
+                // Mouse wheel: niri's defaults — wheel moves column focus
+                // (which scrolls the view).
+                bind("Mod+WheelScrollDown", Action::FocusColumnRight),
+                bind("Mod+WheelScrollUp", Action::FocusColumnLeft),
+                bind("Mod+Ctrl+WheelScrollDown", Action::MoveColumnRight),
+                bind("Mod+Ctrl+WheelScrollUp", Action::MoveColumnLeft),
                 bind("Mod+Home", Action::FocusColumnFirst),
                 bind("Mod+End", Action::FocusColumnLast),
                 bind("Mod+F", Action::MaximizeColumn),
@@ -268,6 +279,12 @@ pub fn parse(source: &str) -> Result<Config, String> {
 }
 
 fn parse_input(node: &KdlNode, config: &mut Config) {
+    // `input { focus-follows-mouse; }` (a bare flag node).
+    if let Some(doc) = node.children()
+        && doc.nodes().iter().any(|n| n.name().value() == "focus-follows-mouse")
+    {
+        config.focus_follows_mouse = true;
+    }
     let Some(doc) = node.children() else { return };
     for n in doc.nodes() {
         if n.name().value() == "keyboard-shortcuts" {
@@ -518,11 +535,31 @@ mod tests {
     fn default_config_is_sane() {
         let cfg = Config::default();
         assert!(matches!(cfg.mod_key, ModKey::Alt));
+        assert!(!cfg.focus_follows_mouse);
         assert_eq!(cfg.layout.gaps, 8.0);
         assert!(cfg
             .binds
             .iter()
             .any(|b| b.combo == "Mod+H" && b.action == Action::FocusColumnLeft));
+        // Niri's wheel binds are in the defaults.
+        assert!(cfg
+            .binds
+            .iter()
+            .any(|b| b.combo == "Mod+WheelScrollDown" && b.action == Action::FocusColumnRight));
+    }
+
+    #[test]
+    fn focus_follows_mouse_flag() {
+        let cfg = parse("input { focus-follows-mouse; }").unwrap();
+        assert!(cfg.focus_follows_mouse);
+        // Absent by default.
+        assert!(!parse("layout { gaps 8; }").unwrap().focus_follows_mouse);
+        // Wheel binds parse like any key.
+        let cfg = parse("binds { Mod+WheelScrollDown { focus-column-right; } }").unwrap();
+        assert!(cfg
+            .binds
+            .iter()
+            .any(|b| b.combo == "Mod+WheelScrollDown"));
     }
 
     #[test]

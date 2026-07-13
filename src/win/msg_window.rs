@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
 
-use crate::input::{self, KeyEvent};
+use crate::input::{self, KeyEvent, MouseEvent};
 
 /// Custom message: a key event forwarded from the keyboard hook.
 pub const WM_APP_KEY: u32 = 0x8000; // WM_APP
@@ -28,6 +28,7 @@ pub const ANIM_TIMER_MS: u32 = 16;
 
 type KeyHandler = Box<dyn Fn(KeyEvent)>;
 type TimerHandler = Box<dyn Fn()>;
+type MouseHandler = Box<dyn Fn(MouseEvent)>;
 
 /// The single instance owning the key handler; wnd_proc needs to reach
 /// it from a static context (single-threaded: all on the main thread).
@@ -38,6 +39,9 @@ unsafe impl Sync for HandlerCell {}
 
 struct TimerHandlerCell(std::cell::UnsafeCell<Option<TimerHandler>>);
 unsafe impl Sync for TimerHandlerCell {}
+
+struct MouseHandlerCell(std::cell::UnsafeCell<Option<MouseHandler>>);
+unsafe impl Sync for MouseHandlerCell {}
 
 impl HandlerCell {
     const fn new() -> Self {
@@ -63,6 +67,28 @@ impl HandlerCell {
 
 static KEY_HANDLER: HandlerCell = HandlerCell::new();
 static TIMER_HANDLER: TimerHandlerCell = TimerHandlerCell::new();
+static MOUSE_HANDLER: MouseHandlerCell = MouseHandlerCell::new();
+
+impl MouseHandlerCell {
+    const fn new() -> Self {
+        MouseHandlerCell(std::cell::UnsafeCell::new(None))
+    }
+
+    /// Safety: main thread only.
+    unsafe fn set(&self, handler: MouseHandler) {
+        unsafe { *self.0.get() = Some(handler) }
+    }
+
+    /// Safety: main thread only.
+    unsafe fn get(&self) -> Option<&MouseHandler> {
+        unsafe { (*self.0.get()).as_ref() }
+    }
+
+    /// Safety: main thread only.
+    unsafe fn take(&self) -> Option<MouseHandler> {
+        unsafe { (*self.0.get()).take() }
+    }
+}
 
 impl TimerHandlerCell {
     const fn new() -> Self {
@@ -149,12 +175,23 @@ impl MessageWindow {
             let _ = SetTimer(Some(self.hwnd), TIMER_ANIM, ANIM_TIMER_MS, None);
         }
     }
+
+    /// Set the handler invoked (on the main thread) for each mouse
+    /// event forwarded by the low-level mouse hook.
+    pub fn set_mouse_handler(&self, handler: impl Fn(MouseEvent) + 'static) {
+        // Safety: main thread only; wnd_proc runs on the main thread
+        // during message dispatch.
+        unsafe {
+            MOUSE_HANDLER.set(Box::new(handler));
+        }
+    }
 }
 
 impl Drop for MessageWindow {
     fn drop(&mut self) {
         unsafe {
             let _ = KEY_HANDLER.take();
+            let _ = MOUSE_HANDLER.take();
             let _ = DestroyWindow(self.hwnd);
         }
     }
@@ -173,6 +210,17 @@ extern "system" fn wnd_proc(
             if let Some(handler) = KEY_HANDLER.get() {
                 let ev = input::decode_message(wparam.0, lparam.0);
                 // Never let a panic cross the FFI boundary.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(ev)));
+            }
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_APP_MOUSE {
+        // Safety: reads the handler on the same (main) thread that set
+        // it, outside any mutation window.
+        unsafe {
+            if let Some(handler) = MOUSE_HANDLER.get() {
+                let ev = input::decode_mouse_message(wparam.0, lparam.0);
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(ev)));
             }
         }

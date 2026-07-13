@@ -3,8 +3,8 @@
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsWindow, IsWindowVisible,
+    GetAncestor, GetClassNameW, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, IsWindowVisible, WindowFromPoint, GA_ROOT,
 };
 use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
 
@@ -25,6 +25,23 @@ pub fn cursor_pos() -> Option<(f64, f64)> {
     let mut pt = POINT::default();
     unsafe { GetCursorPos(&mut pt).ok()? };
     Some((pt.x as f64, pt.y as f64))
+}
+
+/// The top-level (root) window at a screen point, if any. Hits on
+/// child controls are resolved up to their root owner.
+pub fn root_window_at(x: i32, y: i32) -> Option<HWND> {
+    unsafe {
+        let hwnd = WindowFromPoint(POINT { x, y });
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.0.is_null() {
+            None
+        } else {
+            Some(root)
+        }
+    }
 }
 
 /// Convert the last Win32 error into a readable string.
