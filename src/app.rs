@@ -85,6 +85,8 @@ struct AppState {
     floating: std::collections::HashMap<isize, FloatState>,
     /// Workspace indicator overlay (also relays WM_DISPLAYCHANGE).
     overlay: Option<crate::win::overlay::OverlayWindow>,
+    /// Focus ring: outlines the focused window (niri's focus-ring).
+    focus_border: Option<crate::win::focus_border::FocusBorder>,
     /// Window geometry animations.
     animator: Animator,
 }
@@ -138,6 +140,9 @@ impl AppState {
                     log::debug!("user interaction started on window {id}", id = hwnd.0 as isize);
                     self.interacting_window = Some(hwnd);
                     self.interact_start_rect = crate::win::api::window_rect(hwnd);
+                    // The ring would lag behind the dragged window;
+                    // hide it until the drop resolves.
+                    self.update_focus_border();
                 }
             }
             WinEvent::MoveSizeEnd(hwnd) => {
@@ -168,6 +173,10 @@ impl AppState {
                     if self.layout.focus_window(id) {
                         self.update_focus_view(id);
                         self.reflow();
+                    } else {
+                        // Foreground moved to a window we don't track:
+                        // the ring must not stay on the old one.
+                        self.update_focus_border();
                     }
                 }
             }
@@ -485,6 +494,65 @@ impl AppState {
         }
         if let Some(idx) = ws_switch {
             self.show_workspace_overlay(&device, idx);
+        }
+    }
+
+    /// Place the focus ring around the currently focused window (its
+    /// live on-screen rect, so it follows animations). Hidden when
+    /// disabled, during interactions, or when the focused window is
+    /// not visible (inactive workspace / untracked).
+    fn update_focus_border(&self) {
+        let Some(fb) = &self.focus_border else { return };
+        let ring = &self.config.focus_ring;
+        if !ring.enabled || self.interacting_window.is_some() {
+            fb.hide();
+            return;
+        }
+        // The focused window: OS foreground, else the layout focus of
+        // the monitor under the cursor.
+        let candidate = self.focused.or_else(|| {
+            let device = monitor::monitor_at_cursor(&self.monitors)
+                .map(|m| m.device.clone())
+                .or_else(|| self.monitors.first().map(|m| m.device.clone()))?;
+            let id = self.layout.focused_id(&device)?;
+            Some(HWND(id as *mut _))
+        });
+        let Some(hwnd) = candidate else {
+            fb.hide();
+            return;
+        };
+        let id = hwnd.0 as isize;
+        let visible_float = self
+            .floating
+            .get(&id)
+            .and_then(|fs| {
+                self.layout
+                    .monitor(&fs.device)
+                    .map(|ml| ml.active_workspace_idx == fs.workspace_idx)
+            })
+            .unwrap_or(false);
+        let visible_tiled = self.layout.monitors.iter().any(|m| {
+            m.workspace_of(id)
+                .is_some_and(|ws| ws == m.active_workspace_idx)
+        });
+        if !crate::win::api::is_alive(hwnd) || (!visible_float && !visible_tiled) {
+            fb.hide();
+            return;
+        }
+        if let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
+            // Config stores 0xRRGGBB; COLORREF wants 0x00BBGGRR.
+            let rgb = ring.active_color;
+            let bgr = ((rgb & 0xFF) << 16) | (rgb & 0x00FF_00) | ((rgb >> 16) & 0xFF);
+            fb.update(
+                x as i32,
+                y as i32,
+                w as i32,
+                h as i32,
+                ring.width,
+                windows::Win32::Foundation::COLORREF(bgr),
+            );
+        } else {
+            fb.hide();
         }
     }
 
@@ -950,6 +1018,7 @@ impl AppState {
         }
         // Kick an immediate frame so first paint is not delayed.
         self.tick_animations();
+        self.update_focus_border();
     }
 
     /// Advance all animations one frame and push geometry to windows.
@@ -962,6 +1031,9 @@ impl AppState {
             let rect = crate::layout::geometry::TileRect { id, x, y, w, h };
             placement::apply_geometry(&[rect]);
         }
+        // The ring follows the focused window's live rect, so it must
+        // move with every animation frame.
+        self.update_focus_border();
     }
 }
 
@@ -1017,6 +1089,10 @@ impl App {
         if overlay.is_none() {
             log::warn!("failed to create the workspace overlay window");
         }
+        let focus_border = crate::win::focus_border::FocusBorder::new();
+        if focus_border.is_none() {
+            log::warn!("failed to create the focus ring window");
+        }
 
         let state = Rc::new(RefCell::new(AppState {
             windows,
@@ -1030,6 +1106,7 @@ impl App {
             borderless: std::collections::HashSet::new(),
             floating: std::collections::HashMap::new(),
             overlay,
+            focus_border,
             animator: Animator::new(anim_params),
         }));
 

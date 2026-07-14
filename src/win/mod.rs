@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod events;
+pub mod focus_border;
 pub mod monitor;
 pub mod msg_window;
 pub mod overlay;

@@ -129,6 +129,27 @@ impl Default for AnimationsConfig {
     }
 }
 
+/// Niri's `layout { focus-ring { ... } }`: the outline drawn around the
+/// focused window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusRingConfig {
+    pub enabled: bool,
+    /// Ring thickness in pixels.
+    pub width: i32,
+    /// Active color as 0xRRGGBB.
+    pub active_color: u32,
+}
+
+impl Default for FocusRingConfig {
+    fn default() -> Self {
+        FocusRingConfig {
+            enabled: true,
+            width: 4,
+            active_color: 0x7D_AEA3,
+        }
+    }
+}
+
 /// Full configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -137,6 +158,7 @@ pub struct Config {
     /// (niri's optional hover focus).
     pub focus_follows_mouse: bool,
     pub layout: LayoutParams,
+    pub focus_ring: FocusRingConfig,
     pub animations: AnimationsConfig,
     pub binds: Vec<Bind>,
 }
@@ -147,6 +169,7 @@ impl Default for Config {
             mod_key: ModKey::Alt,
             focus_follows_mouse: false,
             layout: LayoutParams::default(),
+            focus_ring: FocusRingConfig::default(),
             animations: AnimationsConfig::default(),
             // niri's default binds (navigation subset we implement).
             binds: vec![
@@ -334,6 +357,7 @@ fn parse_layout(node: &KdlNode, config: &mut Config) {
             "default-column-width" => {
                 config.layout.default_column_width = parse_width_node(n);
             }
+            "focus-ring" => parse_focus_ring(n, config),
             other => log::debug!("ignoring layout node {other:?}"),
         }
     }
@@ -364,6 +388,42 @@ fn parse_width_node(n: &KdlNode) -> ColumnWidth {
         }
     }
     ColumnWidth::Proportion(0.25)
+}
+
+/// `focus-ring { off; width 4; active-color "#7daea3"; }` (naming
+/// follows niri; a bare `focus-ring 4;` sets the width).
+fn parse_focus_ring(n: &KdlNode, config: &mut Config) {
+    if let Some(v) = first_float_arg(n) {
+        config.focus_ring.width = v.max(1.0) as i32;
+    }
+    let Some(doc) = n.children() else { return };
+    for c in doc.nodes() {
+        match c.name().value() {
+            "off" => config.focus_ring.enabled = false,
+            "width" => {
+                if let Some(v) = first_float_arg(c) {
+                    config.focus_ring.width = v.max(1.0) as i32;
+                }
+            }
+            "active-color" => {
+                if let Some(s) = first_string_arg(c)
+                    && let Some(rgb) = parse_hex_color(&s)
+                {
+                    config.focus_ring.active_color = rgb;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// "#7daea3" (or "7daea3") -> 0x7DAEA3.
+fn parse_hex_color(s: &str) -> Option<u32> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(s, 16).ok()
 }
 
 /// `animations { off; window-movement { duration-ms 200; easing "ease-out-expo"; } }`
@@ -625,6 +685,24 @@ mod tests {
         // Unknown easing keeps the old value (soft failure).
         let cfg = parse("animations { window-open { easing \"bogus\"; } }").unwrap();
         assert_eq!(cfg.animations.window_open.easing, Easing::EaseOutCubic);
+    }
+
+    #[test]
+    fn focus_ring_config() {
+        let cfg = parse(
+            r##"layout { focus-ring { width 2; active-color "#ff0000"; } }"##,
+        )
+        .unwrap();
+        assert!(cfg.focus_ring.enabled);
+        assert_eq!(cfg.focus_ring.width, 2);
+        assert_eq!(cfg.focus_ring.active_color, 0xFF_0000);
+
+        let cfg = parse("layout { focus-ring { off; } }").unwrap();
+        assert!(!cfg.focus_ring.enabled);
+
+        // Bad colors keep the old value (soft failure).
+        let cfg = parse(r##"layout { focus-ring { active-color "nope"; } }"##).unwrap();
+        assert_eq!(cfg.focus_ring.active_color, FocusRingConfig::default().active_color);
     }
 
     #[test]
