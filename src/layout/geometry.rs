@@ -270,6 +270,11 @@ pub fn compute_workspace_geometry(
     params: &LayoutParams,
     area: (f64, f64, f64, f64),
 ) -> Vec<TileRect> {
+    // Overview mode: scale everything down to fit (niri's
+    // toggle-overview filmstrip).
+    if ws.is_overview && !ws.columns.is_empty() {
+        return overview_geometry(ws, params, area);
+    }
     let (ax, ay, aw, ah) = area;
     let view_width = (aw - params.edge_padding * 2.0).max(1.0);
     let view_height = (ah - params.edge_padding * 2.0).max(1.0);
@@ -311,6 +316,45 @@ pub fn compute_workspace_geometry(
                 h: h.round().max(1.0) as i32,
             });
         }
+    }
+    out
+}
+
+/// Overview geometry: all columns scaled by the same factor so the
+/// whole workspace fits the view, centered horizontally and
+/// vertically. Focus/navigation keep working on the scaled-down tiles.
+fn overview_geometry(
+    ws: &Workspace,
+    params: &LayoutParams,
+    area: (f64, f64, f64, f64),
+) -> Vec<TileRect> {
+    let (ax, ay, aw, ah) = area;
+    let view_width = (aw - params.edge_padding * 2.0).max(1.0);
+    let view_height = (ah - params.edge_padding * 2.0).max(1.0);
+    let widths = column_widths(ws, params, view_width);
+    let n = ws.columns.len();
+    let total: f64 = widths.iter().sum::<f64>() + params.gaps * (n - 1) as f64;
+    // Uniform scale (with a small margin), never scaled *up*.
+    let scale = ((view_width / total.max(1.0)) * 0.96).min(1.0);
+    let scaled_total = total * scale;
+    let content_left = ax + (aw - scaled_total) / 2.0;
+    let base_y = ay + (ah - view_height * scale) / 2.0;
+
+    let mut out = Vec::new();
+    let mut x = content_left;
+    for (ci, col) in ws.columns.iter().enumerate() {
+        let w = widths[ci] * scale;
+        let heights = tile_heights(ws, ci, params, view_height);
+        for (tile, &(y, h)) in col.tiles.iter().zip(heights.iter()) {
+            out.push(TileRect {
+                id: tile.id,
+                x: x.round() as i32,
+                y: (base_y + y * scale).round() as i32,
+                w: w.round().max(1.0) as i32,
+                h: (h * scale).round().max(1.0) as i32,
+            });
+        }
+        x += w + params.gaps * scale;
     }
     out
 }
@@ -443,6 +487,34 @@ mod tests {
             assert_eq!(r.y, 8);
             assert_eq!(r.h, H as i32 - 16);
         }
+    }
+
+    #[test]
+    fn overview_scales_and_fits() {
+        let mut ws = Workspace::new();
+        for i in 1..=8 {
+            ws.add_window(i);
+        }
+        ws.toggle_overview();
+        let p = params();
+        let rects = compute_workspace_geometry(&ws, &p, area());
+        assert_eq!(rects.len(), 8);
+        // Everything must fit inside the area.
+        for r in &rects {
+            assert!(r.x >= 0 && r.x + r.w <= W as i32, "column fits: {r:?}");
+            assert!(r.y >= 0 && r.y + r.h <= H as i32);
+            assert!(r.h < H as i32, "scaled down vertically");
+        }
+        // Column order preserved, one row.
+        let mut last_x = i32::MIN;
+        for r in &rects {
+            assert!(r.x >= last_x);
+            last_x = r.x;
+        }
+        // Toggling off returns to normal full-height geometry.
+        ws.toggle_overview();
+        let rects = compute_workspace_geometry(&ws, &p, area());
+        assert!(rects.iter().all(|r| r.h == H as i32 - 16));
     }
 
     #[test]

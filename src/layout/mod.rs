@@ -111,6 +111,9 @@ pub struct Workspace {
     /// monitor (niri's `toggle-windowed-fullscreen`). The layout
     /// structure underneath stays intact.
     pub fullscreen_id: Option<WindowId>,
+    /// Overview mode (niri's `toggle-overview`): all columns are scaled
+    /// down so the whole workspace is visible at once. Esc exits.
+    pub is_overview: bool,
     /// Niri semantics: if the active column is removed without any
     /// intermediate focus change, restore focus (and view offset) to the
     /// previously active column instead of the neighbor.
@@ -124,6 +127,7 @@ impl Workspace {
             active_column_idx: 0,
             view_offset: 0.0,
             fullscreen_id: None,
+            is_overview: false,
             activate_prev_column_on_removal: None,
         }
     }
@@ -228,6 +232,14 @@ impl Workspace {
         } else {
             self.fullscreen_id = Some(id);
         }
+        true
+    }
+
+    /// Toggle overview mode (niri's toggle-overview): the whole
+    /// workspace scales down into a filmstrip; Esc (or the same bind)
+    /// exits back into the focused column.
+    pub fn toggle_overview(&mut self) -> bool {
+        self.is_overview = !self.is_overview;
         true
     }
 

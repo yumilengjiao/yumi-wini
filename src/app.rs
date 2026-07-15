@@ -217,6 +217,44 @@ impl AppState {
         }
     }
 
+    /// Exit overview mode on every monitor. Returns true if any was
+    /// active (the caller consumes the key press in that case).
+    fn exit_overviews(&mut self) -> bool {
+        let mut any = false;
+        for m in &mut self.layout.monitors {
+            if m.active_workspace_mut().is_overview {
+                m.active_workspace_mut().is_overview = false;
+                any = true;
+            }
+        }
+        if any {
+            self.reflow();
+        }
+        any
+    }
+
+    /// A click (not a drag) on a window while overview is active:
+    /// exit overview focused on the clicked window. Returns true if
+    /// handled.
+    fn click_in_overview(&mut self, hwnd: HWND) -> bool {
+        let id = hwnd.0 as isize;
+        let in_overview = self.layout.monitors.iter().any(|m| {
+            m.active_workspace().is_overview
+                && m.workspace_of(id) == Some(m.active_workspace_idx)
+        });
+        if !in_overview {
+            return false;
+        }
+        self.exit_overviews();
+        if self.layout.focus_window(id) {
+            self.focused = Some(hwnd);
+            self.update_focus_view(id);
+        }
+        self.reflow();
+        self.sync_focus_to_os();
+        true
+    }
+
     /// Handle a mouse event forwarded by the low-level hook:
     /// - wheel events act as niri-style `WheelScroll*` key binds
     ///   (default `Mod+Wheel` moves column focus, scrolling the view),
@@ -314,6 +352,25 @@ impl AppState {
                 let fs = self.floating.get(&id).cloned().unwrap();
                 self.unfloat_window(id, fs);
                 return;
+            }
+            // These apply to the workspace, not the float itself.
+            match action {
+                Action::ToggleOverview => {
+                    if let Some(fs) = self.floating.get(&id) {
+                        let device = fs.device.clone();
+                        if let Some(ml) = self.layout.monitor_mut(&device)
+                            && ml.active_workspace_mut().toggle_overview()
+                        {
+                            self.reflow();
+                        }
+                    }
+                    return;
+                }
+                Action::CloseWindow => {
+                    self.close_window(id);
+                    return;
+                }
+                _ => {}
             }
             // Map a few tiling actions to float move/resize.
             let mut touched = false;
@@ -654,6 +711,11 @@ impl AppState {
             && (s.0 - e.0).abs() < 10.0
             && (s.1 - e.1).abs() < 10.0
         {
+            // A click while overview is active: exit, focused on the
+            // clicked window.
+            if self.click_in_overview(hwnd) {
+                return;
+            }
             self.reflow();
             return;
         }
@@ -1141,6 +1203,14 @@ impl App {
         msg_window.set_key_handler(move |ev| {
             if !ev.pressed {
                 return;
+            }
+            // Escape exits overview anywhere (niri behavior); if it
+            // did, the press is consumed here.
+            {
+                let mut s = key_state.borrow_mut();
+                if ev.vk == 0x1B && s.exit_overviews() {
+                    return;
+                }
             }
             let mut s = key_state.borrow_mut();
             let action = input::action_for(&s.config.binds, &ev);
