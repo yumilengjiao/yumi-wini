@@ -19,7 +19,7 @@ use crate::layout::geometry::{self, LayoutParams};
 use crate::layout::{DirH, DirV, Edge, Layout, SizeChange};
 use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
-use crate::win::msg_window::MessageWindow;
+use crate::win::msg_window::{MessageWindow, ANIM_TIMER_MS, CONFIG_TIMER_MS, TIMER_ANIM, TIMER_CONFIG};
 use crate::win::placement;
 use crate::win::window::WindowRegistry;
 
@@ -70,6 +70,8 @@ struct AppState {
     params: LayoutParams,
     /// Full configuration (binds, mod key).
     config: Config,
+    /// Mtime of the config file as last loaded (hot reload polling).
+    config_mtime: Option<std::time::SystemTime>,
     /// The window the OS currently considers foreground.
     focused: Option<HWND>,
     /// While the user drags/resizes this window, tiling is paused so we
@@ -552,6 +554,50 @@ impl AppState {
         if let Some(idx) = ws_switch {
             self.show_workspace_overlay(&device, idx);
         }
+    }
+
+    /// Poll the config file for changes (TIMER_CONFIG). On a change,
+    /// reload and apply everything that can be applied live.
+    fn maybe_reload_config(&mut self) {
+        let Ok(meta) = std::fs::metadata(config::config_path()) else {
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return;
+        };
+        if Some(mtime) == self.config_mtime {
+            return;
+        }
+        self.config_mtime = Some(mtime);
+        match config::try_load() {
+            Ok(cfg) => {
+                log::info!("config changed on disk; reloading");
+                self.apply_config(cfg);
+            }
+            Err(err) => {
+                log::warn!("config reload failed ({err}); keeping the previous config");
+            }
+        }
+    }
+
+    /// Apply a (possibly new) configuration live: layout params, focus
+    /// ring, animation tuning, binds and the Mod key.
+    fn apply_config(&mut self, cfg: Config) {
+        let mod_changed = cfg.mod_key != self.config.mod_key;
+        // `animations { off; }` forces zero duration -> instant snaps.
+        let mut anim_params = cfg.animations.window_movement;
+        if !cfg.animations.enabled {
+            anim_params.duration = std::time::Duration::ZERO;
+        }
+        self.animator.set_params(anim_params);
+        self.params = cfg.layout.clone();
+        if mod_changed {
+            input::set_mod_key(cfg.mod_key.clone());
+            log::info!("mod key changed to {:?}", cfg.mod_key);
+        }
+        self.config = cfg;
+        input::update_binds(&self.config.binds);
+        self.reflow();
     }
 
     /// Place the focus ring around the currently focused window (its
@@ -1139,6 +1185,9 @@ impl App {
         log::info!("adopted {count} existing window(s) into the layout at startup");
 
         let cfg = config::load();
+        let config_mtime = std::fs::metadata(config::config_path())
+            .and_then(|m| m.modified())
+            .ok();
 
         // Animation tuning: `animations { off; }` forces zero duration,
         // which makes every retarget land instantly.
@@ -1162,6 +1211,7 @@ impl App {
             layout,
             params: cfg.layout.clone(),
             config: cfg,
+            config_mtime,
             focused: None,
             interacting_window: None,
             interact_start_rect: None,
@@ -1219,11 +1269,16 @@ impl App {
                 s.dispatch(action);
             }
         });
-        // Animation frames: tick the animator at ~60 Hz.
+        // Animation frames: tick the animator at ~60 Hz; config hot
+        // reload polls the file once a second.
         {
             let anim_state = Rc::clone(&state);
-            msg_window.start_anim_timer(move || {
+            msg_window.start_timer(TIMER_ANIM, ANIM_TIMER_MS, move || {
                 anim_state.borrow_mut().tick_animations();
+            });
+            let cfg_state = Rc::clone(&state);
+            msg_window.start_timer(TIMER_CONFIG, CONFIG_TIMER_MS, move || {
+                cfg_state.borrow_mut().maybe_reload_config();
             });
         }
         // Display hotplug: WM_DISPLAYCHANGE arrives on the (top-level)

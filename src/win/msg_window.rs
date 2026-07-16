@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::input::{self, KeyEvent, MouseEvent};
+use std::collections::HashMap;
 
 /// Custom message: a key event forwarded from the keyboard hook.
 pub const WM_APP_KEY: u32 = 0x8000; // WM_APP
@@ -23,8 +24,12 @@ pub const WM_APP_KEY: u32 = 0x8000; // WM_APP
 pub const WM_APP_MOUSE: u32 = 0x8001;
 /// Animation frame timer id.
 pub const TIMER_ANIM: usize = 1;
+/// Config hot-reload poll timer id.
+pub const TIMER_CONFIG: usize = 3;
 /// Animation frame period (ms). ~60 Hz.
 pub const ANIM_TIMER_MS: u32 = 16;
+/// Config file poll period (ms).
+pub const CONFIG_TIMER_MS: u32 = 1000;
 
 type KeyHandler = Box<dyn Fn(KeyEvent)>;
 type TimerHandler = Box<dyn Fn()>;
@@ -37,7 +42,7 @@ type MouseHandler = Box<dyn Fn(MouseEvent)>;
 struct HandlerCell(std::cell::UnsafeCell<Option<KeyHandler>>);
 unsafe impl Sync for HandlerCell {}
 
-struct TimerHandlerCell(std::cell::UnsafeCell<Option<TimerHandler>>);
+struct TimerHandlerCell(std::cell::UnsafeCell<Option<HashMap<usize, TimerHandler>>>);
 unsafe impl Sync for TimerHandlerCell {}
 
 struct MouseHandlerCell(std::cell::UnsafeCell<Option<MouseHandler>>);
@@ -96,17 +101,21 @@ impl TimerHandlerCell {
     }
 
     /// Safety: main thread only.
-    unsafe fn set(&self, handler: TimerHandler) {
-        unsafe { *self.0.get() = Some(handler) }
+    unsafe fn insert(&self, id: usize, handler: TimerHandler) {
+        unsafe {
+            (*self.0.get())
+                .get_or_insert_with(HashMap::new)
+                .insert(id, handler);
+        }
     }
 
     /// Safety: main thread only.
-    unsafe fn get(&self) -> Option<&TimerHandler> {
-        unsafe { (*self.0.get()).as_ref() }
+    unsafe fn get(&self, id: usize) -> Option<&TimerHandler> {
+        unsafe { (*self.0.get()).as_ref()?.get(&id) }
     }
 
     /// Safety: main thread only.
-    unsafe fn take(&self) -> Option<TimerHandler> {
+    unsafe fn take(&self) -> Option<HashMap<usize, TimerHandler>> {
         unsafe { (*self.0.get()).take() }
     }
 }
@@ -168,11 +177,14 @@ impl MessageWindow {
         }
     }
 
-    /// Set the periodic animation tick handler and start the timer.
-    pub fn start_anim_timer(&self, handler: impl Fn() + 'static) {
+    /// Start a periodic timer whose handler runs on the main thread
+    /// during message dispatch. `id` identifies it (TIMER_ANIM, ...).
+    pub fn start_timer(&self, id: usize, period_ms: u32, handler: impl Fn() + 'static) {
+        // Safety: main thread only; wnd_proc runs on the main thread
+        // during message dispatch.
         unsafe {
-            TIMER_HANDLER.set(Box::new(handler));
-            let _ = SetTimer(Some(self.hwnd), TIMER_ANIM, ANIM_TIMER_MS, None);
+            TIMER_HANDLER.insert(id, Box::new(handler));
+            let _ = SetTimer(Some(self.hwnd), id, period_ms, None);
         }
     }
 
@@ -226,16 +238,14 @@ extern "system" fn wnd_proc(
         }
         return LRESULT(0);
     }
-    if msg == windows::Win32::UI::WindowsAndMessaging::WM_TIMER
-        && wparam.0 == TIMER_ANIM
-    {
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_TIMER {
         unsafe {
-            if let Some(handler) = TIMER_HANDLER.get() {
+            if let Some(handler) = TIMER_HANDLER.get(wparam.0) {
                 let _ =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
+                return LRESULT(0);
             }
         }
-        return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }

@@ -97,6 +97,14 @@ pub fn install(mod_key: ModKey, target: HWND) -> Result<(), String> {
     Ok(())
 }
 
+/// Change the Mod key without reinstalling the hook (config hot
+/// reload).
+pub fn set_mod_key(mod_key: ModKey) {
+    if let Some(s) = MOUSE_HOOK_STATE.lock().unwrap().as_mut() {
+        s.mod_key = mod_key;
+    }
+}
+
 /// Remove the hook (called on shutdown).
 pub fn uninstall() {
     let handle = MOUSE_HOOK_PTR.swap(0, Ordering::SeqCst);

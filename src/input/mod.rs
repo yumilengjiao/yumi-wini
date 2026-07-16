@@ -145,6 +145,15 @@ pub fn install(mod_key: ModKey, target: HWND) -> Result<(), String> {
     Ok(())
 }
 
+/// Change the Mod key without reinstalling the hooks (config hot
+/// reload). The hook threads read it live from the shared state.
+pub fn set_mod_key(mod_key: ModKey) {
+    if let Some(s) = HOOK_STATE.lock().unwrap().as_mut() {
+        s.mod_key = mod_key.clone();
+    }
+    mouse::set_mod_key(mod_key);
+}
+
 /// Remove the hook (called on shutdown).
 pub fn uninstall() {
     let handle = HOOK_HANDLE_PTR.swap(0, Ordering::SeqCst);

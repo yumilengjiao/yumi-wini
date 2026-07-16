@@ -256,27 +256,33 @@ pub fn config_path() -> PathBuf {
 /// (with a logged warning). Never fails hard — a broken config should
 /// not brick the WM.
 pub fn load() -> Config {
-    let path = config_path();
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => {
-            log::info!(
-                "no config at {} — using defaults (drop one there to customize)",
-                path.display()
-            );
-            return Config::default();
-        }
-    };
-    match parse(&source) {
+    match try_load() {
         Ok(cfg) => {
-            log::info!("loaded config from {}", path.display());
+            log::info!("loaded config from {}", config_path().display());
             cfg
         }
         Err(err) => {
-            log::warn!("config parse error ({err}); using defaults");
+            if err.starts_with("missing") {
+                log::info!(
+                    "no config at {} — using defaults (drop one there to customize)",
+                    config_path().display()
+                );
+            } else {
+                log::warn!("config parse error ({err}); using defaults");
+            }
             Config::default()
         }
     }
+}
+
+/// Load and parse the config, reporting errors instead of falling
+/// back — used by the hot-reload path, which keeps the previous
+/// config when the new one is broken.
+pub fn try_load() -> Result<Config, String> {
+    let path = config_path();
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| format!("missing/unreadable: {e}"))?;
+    parse(&source)
 }
 
 /// Parse KDL text into a Config. Unknown nodes/fields are ignored

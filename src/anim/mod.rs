@@ -195,6 +195,13 @@ impl Animator {
         self.rects.remove(&id);
     }
 
+    /// Replace the animation parameters (config hot reload). Applies
+    /// to animations started afterwards; in-flight ones keep their
+    /// original parameters.
+    pub fn set_params(&mut self, params: AnimParams) {
+        self.params = params;
+    }
+
     pub fn is_animating(&self) -> bool {
         self.rects.values().any(|r| !r.finished())
     }
