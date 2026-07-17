@@ -21,7 +21,7 @@ use crate::win::events::{EventHooks, WinEvent};
 use crate::win::monitor::{self, Monitor};
 use crate::win::msg_window::{MessageWindow, ANIM_TIMER_MS, CONFIG_TIMER_MS, TIMER_ANIM, TIMER_CONFIG};
 use crate::win::placement;
-use crate::win::window::WindowRegistry;
+use crate::win::window::{WindowInfo, WindowRegistry};
 
 /// Fatal, top-level error.
 #[derive(Debug)]
@@ -109,7 +109,7 @@ impl AppState {
                         info.class
                     );
                     self.windows.insert(info.clone());
-                    self.layout_add_window(hwnd);
+                    self.layout_add_window(&info);
                     self.reflow();
                 }
             }
@@ -185,14 +185,74 @@ impl AppState {
         }
     }
 
-    /// Place a newly tracked window into the layout of the monitor it
-    /// currently lives on.
-    fn layout_add_window(&mut self, hwnd: HWND) {
-        let id = hwnd.0 as isize;
+    /// Place a newly tracked window into the layout, applying any
+    /// matching window-rule (open-floating / open-on-workspace /
+    /// open-maximized / open-fullscreen). Falls back to the active
+    /// workspace of the monitor the window currently lives on.
+    fn layout_add_window(&mut self, info: &WindowInfo) {
+        let id = info.id();
+        let hwnd = info.hwnd;
         let device = monitor::monitor_of_window(hwnd, &self.monitors)
             .map(|m| m.device.clone())
             .unwrap_or_default();
-        self.layout.add_window(&device, id);
+        let rule = self
+            .config
+            .match_rule(&info.exe, &info.title, &info.class)
+            .cloned();
+
+        // open-floating: keep the window at its current position,
+        // outside the tiling grid.
+        if rule.as_ref().is_some_and(|r| r.open_floating) {
+            if let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
+                let ws_idx = self
+                    .layout
+                    .monitor(&device)
+                    .map(|m| m.active_workspace_idx)
+                    .unwrap_or(0);
+                self.floating.insert(
+                    id,
+                    FloatState {
+                        device,
+                        workspace_idx: ws_idx,
+                        x,
+                        y,
+                        w,
+                        h,
+                    },
+                );
+                log::debug!("window-rule: {id} opens floating");
+                return;
+            }
+        }
+
+        match rule.as_ref().and_then(|r| r.open_workspace) {
+            Some(n) => {
+                let idx = n.saturating_sub(1) as usize;
+                if let Some(ml) = self.layout.monitor_mut(&device) {
+                    ml.add_window_to_workspace(id, idx);
+                } else {
+                    self.layout.add_window(&device, id);
+                }
+                log::debug!("window-rule: {id} opens on workspace {}", idx + 1);
+            }
+            None => self.layout.add_window(&device, id),
+        }
+
+        // open-maximized / open-fullscreen: flag the new column/window.
+        if let Some(r) = rule {
+            if let Some(ml) = self.layout.monitor_mut(&device)
+                && let Some((ci, _)) = ml.active_workspace().find(id)
+            {
+                if r.open_maximized {
+                    let col = &mut ml.active_workspace_mut().columns[ci];
+                    col.is_maximized = true;
+                    col.is_full_width = true;
+                }
+                if r.open_fullscreen {
+                    ml.active_workspace_mut().fullscreen_id = Some(id);
+                }
+            }
+        }
         log::debug!(
             "layout: window {id} -> monitor {device}, column {}",
             self.layout
@@ -645,7 +705,7 @@ impl AppState {
         if let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
             // Config stores 0xRRGGBB; COLORREF wants 0x00BBGGRR.
             let rgb = ring.active_color;
-            let bgr = ((rgb & 0xFF) << 16) | (rgb & 0x00FF_00) | ((rgb >> 16) & 0xFF);
+            let bgr = ((rgb & 0xFF) << 16) | (rgb & 0x00_FF_00) | ((rgb >> 16) & 0xFF);
             fb.update(
                 x as i32,
                 y as i32,
@@ -1174,14 +1234,7 @@ impl App {
         }
 
         let mut windows = WindowRegistry::new();
-        let mut layout = Layout::new();
         let count = windows.adopt_existing();
-        for info in windows.iter() {
-            let device = monitor::monitor_of_window(info.hwnd, &monitors)
-                .map(|m| m.device.clone())
-                .unwrap_or_default();
-            layout.add_window(&device, info.id());
-        }
         log::info!("adopted {count} existing window(s) into the layout at startup");
 
         let cfg = config::load();
@@ -1208,7 +1261,7 @@ impl App {
         let state = Rc::new(RefCell::new(AppState {
             windows,
             monitors,
-            layout,
+            layout: Layout::new(),
             params: cfg.layout.clone(),
             config: cfg,
             config_mtime,
@@ -1221,6 +1274,16 @@ impl App {
             focus_border,
             animator: Animator::new(anim_params),
         }));
+
+        // Adopt existing windows through the same window-rule path as
+        // newly opened ones (rules apply at startup too).
+        {
+            let infos: Vec<WindowInfo> = state.borrow().windows.iter().cloned().collect();
+            let mut s = state.borrow_mut();
+            for info in &infos {
+                s.layout_add_window(info);
+            }
+        }
 
         // Perform the initial tiling of everything we adopted.
         state.borrow_mut().reflow();

@@ -150,6 +150,42 @@ impl Default for FocusRingConfig {
     }
 }
 
+/// A niri-style window rule: when a newly opened window matches, the
+/// rule's `open-*` properties are applied to it.
+/// Matching is case-insensitive substring on exe (niri's app-id
+/// equivalent), title and/or class; all specified fields must match.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WindowRule {
+    pub match_exe: Option<String>,
+    pub match_title: Option<String>,
+    pub match_class: Option<String>,
+    pub open_floating: bool,
+    /// 1-based workspace index.
+    pub open_workspace: Option<u8>,
+    pub open_maximized: bool,
+    pub open_fullscreen: bool,
+}
+
+impl WindowRule {
+    /// Does a window with these strings match this rule?
+    pub fn matches(&self, exe: &str, title: &str, class: &str) -> bool {
+        let sub = |hay: &str, needle: &Option<String>| match needle {
+            Some(n) => hay.to_lowercase().contains(&n.to_lowercase()),
+            None => true,
+        };
+        sub(exe, &self.match_exe) && sub(title, &self.match_title) && sub(class, &self.match_class)
+    }
+}
+
+impl Config {
+    /// First rule matching the given window, if any.
+    pub fn match_rule(&self, exe: &str, title: &str, class: &str) -> Option<&WindowRule> {
+        self.window_rules
+            .iter()
+            .find(|r| r.matches(exe, title, class))
+    }
+}
+
 /// Full configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -161,6 +197,7 @@ pub struct Config {
     pub focus_ring: FocusRingConfig,
     pub animations: AnimationsConfig,
     pub binds: Vec<Bind>,
+    pub window_rules: Vec<WindowRule>,
 }
 
 impl Default for Config {
@@ -171,6 +208,7 @@ impl Default for Config {
             layout: LayoutParams::default(),
             focus_ring: FocusRingConfig::default(),
             animations: AnimationsConfig::default(),
+            window_rules: Vec::new(),
             // niri's default binds (navigation subset we implement).
             binds: vec![
                 bind("Mod+Left", Action::FocusColumnLeft),
@@ -301,6 +339,7 @@ pub fn parse(source: &str) -> Result<Config, String> {
             "layout" => parse_layout(node, &mut config),
             "animations" => parse_animations(node, &mut config),
             "binds" => parse_binds(node, &mut config),
+            "window-rule" => parse_window_rule(node, &mut config),
             other => log::debug!("ignoring unknown config node {other:?}"),
         }
     }
@@ -394,6 +433,43 @@ fn parse_width_node(n: &KdlNode) -> ColumnWidth {
         }
     }
     ColumnWidth::Proportion(0.25)
+}
+
+/// `window-rule { match app-id="firefox" title="download"; open-floating true; }`
+/// niri names accepted: app-id maps to the exe name; also `exe=`.
+fn parse_window_rule(node: &KdlNode, config: &mut Config) {
+    let mut rule = WindowRule::default();
+    let Some(doc) = node.children() else { return };
+    for n in doc.nodes() {
+        match n.name().value() {
+            "match" => {
+                for e in n.entries() {
+                    let Some(name) = e.name().map(|s| s.value().to_string()) else {
+                        continue;
+                    };
+                    let Some(v) = e.value().as_string().map(|s| s.to_string()) else {
+                        continue;
+                    };
+                    match name.as_str() {
+                        "app-id" | "exe" => rule.match_exe = Some(v),
+                        "title" => rule.match_title = Some(v),
+                        "class" => rule.match_class = Some(v),
+                        _ => log::debug!("ignoring window-rule match field {name:?}"),
+                    }
+                }
+            }
+            "open-floating" => rule.open_floating = first_bool_arg(n).unwrap_or(true),
+            "open-on-workspace" => {
+                rule.open_workspace = first_string_arg(n)
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| first_float_arg(n).map(|f| f as u8))
+            }
+            "open-maximized" => rule.open_maximized = first_bool_arg(n).unwrap_or(true),
+            "open-fullscreen" => rule.open_fullscreen = first_bool_arg(n).unwrap_or(true),
+            other => log::debug!("ignoring window-rule node {other:?}"),
+        }
+    }
+    config.window_rules.push(rule);
 }
 
 /// `focus-ring { off; width 4; active-color "#7daea3"; }` (naming
@@ -586,6 +662,13 @@ fn first_float_arg(node: &KdlNode) -> Option<f64> {
         })
 }
 
+fn first_bool_arg(node: &KdlNode) -> Option<bool> {
+    node.entries()
+        .iter()
+        .filter(|e| e.name().is_none())
+        .find_map(|e| e.value().as_bool())
+}
+
 #[allow(dead_code)]
 fn has_property(node: &KdlNode, name: &str) -> bool {
     node.entries()
@@ -691,6 +774,40 @@ mod tests {
         // Unknown easing keeps the old value (soft failure).
         let cfg = parse("animations { window-open { easing \"bogus\"; } }").unwrap();
         assert_eq!(cfg.animations.window_open.easing, Easing::EaseOutCubic);
+    }
+
+    #[test]
+    fn window_rule_parsing_and_matching() {
+        let cfg = parse(
+            r#"
+            window-rule {
+                match app-id="Firefox" title="Download"
+                open-floating
+            }
+            window-rule {
+                match exe="notepad.exe"
+                open-on-workspace 2
+                open-maximized
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.window_rules.len(), 2);
+
+        // Substring, case-insensitive.
+        let r = cfg.match_rule("firefox.exe", "Downloads", "Mozilla").unwrap();
+        assert!(r.open_floating);
+        // Title mismatch: no hit on rule 0; falls through to rule 1.
+        assert!(cfg.match_rule("firefox.exe", "New Tab", "Mozilla").is_none());
+        let r = cfg.match_rule("notepad.exe", "Untitled", "Notepad").unwrap();
+        assert_eq!(r.open_workspace, Some(2));
+        assert!(r.open_maximized);
+
+        // Bare `open-floating;` implies true; `#false` disables.
+        let cfg = parse("window-rule { match exe=\"a\"; open-floating; }").unwrap();
+        assert!(cfg.window_rules[0].open_floating);
+        let cfg = parse("window-rule { match exe=\"a\"; open-floating #false; }").unwrap();
+        assert!(!cfg.window_rules[0].open_floating);
     }
 
     #[test]

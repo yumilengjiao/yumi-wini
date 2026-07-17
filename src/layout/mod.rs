@@ -684,6 +684,16 @@ impl MonitorLayout {
         self.window_map.insert(id, ws);
     }
 
+    /// Add a window to a specific (1-based-index-resolved) workspace,
+    /// growing the list on demand, and make that workspace active so
+    /// focus follows the new window (window-rule open-on-workspace).
+    pub fn add_window_to_workspace(&mut self, id: WindowId, idx: usize) {
+        self.ensure_workspaces(idx + 1);
+        self.workspaces[idx].add_window(id);
+        self.window_map.insert(id, idx);
+        self.active_workspace_idx = idx;
+    }
+
     pub fn remove_window(&mut self, id: WindowId) -> bool {
         let Some(ws) = self.window_map.remove(&id) else {
             return false;
