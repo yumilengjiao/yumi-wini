@@ -402,6 +402,9 @@ fn parse_layout(node: &KdlNode, config: &mut Config) {
             "default-column-width" => {
                 config.layout.default_column_width = parse_width_node(n);
             }
+            "preset-column-widths" => {
+                config.layout.preset_column_widths = parse_preset_widths(n);
+            }
             "focus-ring" => parse_focus_ring(n, config),
             other => log::debug!("ignoring layout node {other:?}"),
         }
@@ -470,6 +473,25 @@ fn parse_window_rule(node: &KdlNode, config: &mut Config) {
         }
     }
     config.window_rules.push(rule);
+}
+
+/// `preset-column-widths { proportion 0.33; proportion 0.5; fixed 1280; }`
+/// — a list of widths cycled through by a bare `set-column-width`.
+fn parse_preset_widths(n: &KdlNode) -> Vec<ColumnWidth> {
+    let mut out = Vec::new();
+    let Some(doc) = n.children() else { return out };
+    for child in doc.nodes() {
+        let w = match child.name().value() {
+            "proportion" => first_float_arg(child)
+                .map(|p| ColumnWidth::Proportion(p.clamp(0.01, 100.0))),
+            "fixed" => first_float_arg(child).map(|f| ColumnWidth::Fixed(f.clamp(1.0, 100_000.0))),
+            _ => None,
+        };
+        if let Some(w) = w {
+            out.push(w);
+        }
+    }
+    out
 }
 
 /// `focus-ring { off; width 4; active-color "#7daea3"; }` (naming
@@ -808,6 +830,38 @@ mod tests {
         assert!(cfg.window_rules[0].open_floating);
         let cfg = parse("window-rule { match exe=\"a\"; open-floating #false; }").unwrap();
         assert!(!cfg.window_rules[0].open_floating);
+    }
+
+    #[test]
+    fn preset_column_widths_config() {
+        let cfg = parse(
+            "layout { preset-column-widths { proportion 0.33; proportion 0.5; fixed 1280; } }",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.layout.preset_column_widths,
+            vec![
+                ColumnWidth::Proportion(0.33),
+                ColumnWidth::Proportion(0.5),
+                ColumnWidth::Fixed(1280.0)
+            ]
+        );
+
+        // Cycling: default -> first -> ... -> wraps.
+        let presets = cfg.layout.preset_column_widths.clone();
+        let mut ws = crate::layout::Workspace::new();
+        ws.add_window(1);
+        assert!(ws.cycle_column_width(&presets));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Proportion(0.33)));
+        assert!(ws.cycle_column_width(&presets));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Proportion(0.5)));
+        assert!(ws.cycle_column_width(&presets));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Fixed(1280.0)));
+        assert!(ws.cycle_column_width(&presets));
+        assert_eq!(ws.columns[0].width, Some(ColumnWidth::Proportion(0.33)));
+
+        // Empty presets: no-op.
+        assert!(!ws.cycle_column_width(&[]));
     }
 
     #[test]

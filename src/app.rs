@@ -522,6 +522,9 @@ impl AppState {
         let mut fullscreen_now: Option<isize> = None;
         // Workspace we switched to (for the indicator overlay), if any.
         let mut ws_switch: Option<usize> = None;
+        // Preset column widths for the bare set-column-width (cloned
+        // out before the layout borrow below).
+        let presets = self.params.preset_column_widths.clone();
         {
             let monitor_layout = self.layout.monitor_mut(&device).unwrap();
             let ws = monitor_layout.active_workspace_mut();
@@ -541,8 +544,11 @@ impl AppState {
                 FocusColumnFirst => changed = ws.focus_column_edge(Edge::First),
                 FocusColumnLast => changed = ws.focus_column_edge(Edge::Last),
                 SetColumnWidth(spec) => {
-                    if let Some(change) = SizeChange::parse(&spec) {
-                        changed = ws.set_column_width(&change);
+                    match SizeChange::parse(&spec) {
+                        Some(change) => changed = ws.set_column_width(&change),
+                        // Bare `set-column-width;` cycles the presets
+                        // (niri's preset-column-widths).
+                        None => changed = ws.cycle_column_width(&presets),
                     }
                 }
                 SetWindowHeight(spec) => {

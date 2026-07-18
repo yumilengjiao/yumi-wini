@@ -35,6 +35,9 @@ pub struct LayoutParams {
     pub edge_padding: f64,
     /// Width for columns that don't specify one.
     pub default_column_width: ColumnWidth,
+    /// Preset column widths cycled through by a bare `set-column-width`
+    /// (niri's preset-column-widths).
+    pub preset_column_widths: Vec<ColumnWidth>,
     pub center_focused_column: CenterFocused,
 }
 
@@ -46,6 +49,7 @@ impl Default for LayoutParams {
             gaps: 8.0,
             edge_padding: 8.0,
             default_column_width: ColumnWidth::Proportion(0.25),
+            preset_column_widths: Vec::new(),
             center_focused_column: CenterFocused::OnOverflow,
         }
     }
@@ -372,6 +376,7 @@ mod tests {
             gaps: 8.0,
             edge_padding: 8.0,
             default_column_width: ColumnWidth::Proportion(0.25),
+            preset_column_widths: Vec::new(),
             center_focused_column: CenterFocused::OnOverflow,
         }
     }

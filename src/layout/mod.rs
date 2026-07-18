@@ -507,6 +507,32 @@ impl Workspace {
         true
     }
 
+    /// Niri's preset-column-widths: a bare `set-column-width` cycles the
+    /// focused column through the configured presets. The next preset
+    /// is the first one after the current width's position (default
+    /// width counts as "before the first preset").
+    pub fn cycle_column_width(&mut self, presets: &[ColumnWidth]) -> bool {
+        if presets.is_empty() {
+            return false;
+        }
+        let Some(col) = self.columns.get_mut(self.active_column_idx) else {
+            return false;
+        };
+        let next = match col.width {
+            None => presets[0],
+            Some(w) => {
+                let idx = presets.iter().position(|&p| p == w);
+                match idx {
+                    Some(i) => presets[(i + 1) % presets.len()],
+                    None => presets[0],
+                }
+            }
+        };
+        col.width = Some(next);
+        col.is_full_width = false;
+        true
+    }
+
     /// Toggle the focused column between full width and its previous
     /// width.
     pub fn toggle_full_width(&mut self) -> bool {
