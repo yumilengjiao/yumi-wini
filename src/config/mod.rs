@@ -198,6 +198,8 @@ pub struct Config {
     pub animations: AnimationsConfig,
     pub binds: Vec<Bind>,
     pub window_rules: Vec<WindowRule>,
+    /// `spawn-at-startup "cmd"` entries, in order.
+    pub spawn_at_startup: Vec<String>,
 }
 
 impl Default for Config {
@@ -209,6 +211,7 @@ impl Default for Config {
             focus_ring: FocusRingConfig::default(),
             animations: AnimationsConfig::default(),
             window_rules: Vec::new(),
+            spawn_at_startup: Vec::new(),
             // niri's default binds (navigation subset we implement).
             binds: vec![
                 bind("Mod+Left", Action::FocusColumnLeft),
@@ -340,6 +343,11 @@ pub fn parse(source: &str) -> Result<Config, String> {
             "animations" => parse_animations(node, &mut config),
             "binds" => parse_binds(node, &mut config),
             "window-rule" => parse_window_rule(node, &mut config),
+            "spawn-at-startup" => {
+                if let Some(cmd) = first_string_arg(node) {
+                    config.spawn_at_startup.push(cmd);
+                }
+            }
             other => log::debug!("ignoring unknown config node {other:?}"),
         }
     }
@@ -862,6 +870,17 @@ mod tests {
 
         // Empty presets: no-op.
         assert!(!ws.cycle_column_width(&[]));
+    }
+
+    #[test]
+    fn spawn_at_startup_config() {
+        let cfg = parse(
+            r#"spawn-at-startup "alacritty"
+            spawn-at-startup "notepad.exe""#,
+        )
+        .unwrap();
+        assert_eq!(cfg.spawn_at_startup, vec!["alacritty", "notepad.exe"]);
+        assert!(Config::default().spawn_at_startup.is_empty());
     }
 
     #[test]

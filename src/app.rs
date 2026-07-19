@@ -85,6 +85,9 @@ struct AppState {
     borderless: std::collections::HashSet<isize>,
     /// Floating windows (out of the tiling grid).
     floating: std::collections::HashMap<isize, FloatState>,
+    /// Each window's geometry as it was when we started managing it;
+    /// restored on exit so the desktop is left as we found it.
+    original_rects: std::collections::HashMap<isize, windows::Win32::Foundation::RECT>,
     /// Workspace indicator overlay (also relays WM_DISPLAYCHANGE).
     overlay: Option<crate::win::overlay::OverlayWindow>,
     /// Focus ring: outlines the focused window (niri's focus-ring).
@@ -109,6 +112,7 @@ impl AppState {
                         info.class
                     );
                     self.windows.insert(info.clone());
+                    self.original_rects.insert(hwnd.0 as isize, info.rect);
                     self.layout_add_window(&info);
                     self.reflow();
                 }
@@ -123,6 +127,7 @@ impl AppState {
                     self.animator.remove(id);
                     self.restore_borders(id);
                     self.floating.remove(&id);
+                    self.original_rects.remove(&id);
                     self.reflow();
                 }
             }
@@ -134,6 +139,7 @@ impl AppState {
                     self.animator.remove(id);
                     self.restore_borders(id);
                     self.floating.remove(&id);
+                    self.original_rects.remove(&id);
                     self.reflow();
                 }
             }
@@ -276,6 +282,41 @@ impl AppState {
                 geometry::refresh_view_offset(ws, &params, view_width, None);
                 return;
             }
+        }
+    }
+
+    /// Undo everything we did to real windows: restore decorations,
+    /// original geometry and visibility. Called on the way out so the
+    /// desktop is left as we found it.
+    fn restore_all(&mut self) {
+        let ids: Vec<isize> = self.original_rects.keys().copied().collect();
+        log::info!(
+            "exiting: restoring geometry of {} window(s)",
+            ids.len()
+        );
+        for id in ids {
+            let hwnd = HWND(id as *mut _);
+            if !crate::win::api::is_alive(hwnd) {
+                self.original_rects.remove(&id);
+                continue;
+            }
+            self.restore_borders(id);
+            if let Some(rc) = self.original_rects.get(&id) {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                        hwnd,
+                        None,
+                        rc.left,
+                        rc.top,
+                        rc.right - rc.left,
+                        rc.bottom - rc.top,
+                        windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                            | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+                    );
+                }
+            }
+            // Windows on hidden workspaces must come back.
+            placement::set_shown(hwnd, true);
         }
     }
 
@@ -1276,6 +1317,7 @@ impl App {
             interact_start_rect: None,
             borderless: std::collections::HashSet::new(),
             floating: std::collections::HashMap::new(),
+            original_rects: std::collections::HashMap::new(),
             overlay,
             focus_border,
             animator: Animator::new(anim_params),
@@ -1287,6 +1329,7 @@ impl App {
             let infos: Vec<WindowInfo> = state.borrow().windows.iter().cloned().collect();
             let mut s = state.borrow_mut();
             for info in &infos {
+                s.original_rects.insert(info.id(), info.rect);
                 s.layout_add_window(info);
             }
         }
@@ -1361,6 +1404,13 @@ impl App {
         // Compile the combo table for hook-side swallowing.
         input::update_binds(&state.borrow().config.binds);
 
+        // spawn-at-startup entries, in order. Spawned windows appear
+        // after the hooks are live, so they are adopted and tiled like
+        // any other window.
+        for cmd in state.borrow().config.spawn_at_startup.clone() {
+            state.borrow().spawn(&cmd);
+        }
+
         Ok(App {
             state,
             _hooks: hooks,
@@ -1396,6 +1446,9 @@ impl App {
             "message loop exited; was tracking {} window(s)",
             state.windows.len()
         );
+        drop(state);
+        // Leave the desktop as we found it.
+        self.state.borrow_mut().restore_all();
         input::uninstall();
         Ok(())
     }
