@@ -584,6 +584,9 @@ impl AppState {
                 ConsumeOrExpelWindowRight => changed = ws.consume_or_expel(DirH::Right),
                 FocusColumnFirst => changed = ws.focus_column_edge(Edge::First),
                 FocusColumnLast => changed = ws.focus_column_edge(Edge::Last),
+                FocusColumnIndex(n) => {
+                    changed = ws.focus_column_index(n.saturating_sub(1) as usize)
+                }
                 SetColumnWidth(spec) => {
                     match SizeChange::parse(&spec) {
                         Some(change) => changed = ws.set_column_width(&change),

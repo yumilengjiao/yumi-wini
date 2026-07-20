@@ -591,6 +591,22 @@ impl Workspace {
             Edge::First => 0,
             Edge::Last => self.columns.len() - 1,
         };
+        self.focus_column_at(idx)
+    }
+
+    /// Focus the column at `index` (0-based, clamped to the last
+    /// column) — the `focus-column-index` action behind the numeric
+    /// key binds.
+    pub fn focus_column_index(&mut self, index: usize) -> bool {
+        match self.columns.len().checked_sub(1) {
+            Some(last) => self.focus_column_at(index.min(last)),
+            None => false,
+        }
+    }
+
+    /// Focus the column at `idx` (already validated), resetting the
+    /// view offset like any horizontal focus jump.
+    fn focus_column_at(&mut self, idx: usize) -> bool {
         if idx != self.active_column_idx {
             self.active_column_idx = idx;
             self.view_offset = 0.0;
@@ -1174,5 +1190,25 @@ mod tests {
         assert_eq!(ws.focused_id(), Some(4));
         // No-op returns false.
         assert!(!ws.focus_column_edge(Edge::Last));
+    }
+
+    #[test]
+    fn focus_column_index() {
+        let mut ws = Workspace::new();
+        assert!(!ws.focus_column_index(0)); // empty workspace
+        for i in 1..=3 {
+            ws.add_window(i);
+        }
+        // add_window focuses the new column, so we're on the last one.
+        assert!(!ws.focus_column_index(2)); // already focused
+        assert_eq!(ws.focused_id(), Some(3));
+        assert!(ws.focus_column_index(0));
+        assert_eq!(ws.focused_id(), Some(1));
+        assert!(ws.focus_column_index(1));
+        assert_eq!(ws.focused_id(), Some(2));
+        // Out of range clamps to the last column.
+        assert!(ws.focus_column_index(8));
+        assert_eq!(ws.focused_id(), Some(3));
+        assert!(!ws.focus_column_index(8));
     }
 }

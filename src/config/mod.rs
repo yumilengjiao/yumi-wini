@@ -69,6 +69,8 @@ pub enum Action {
     FocusColumnRight,
     FocusColumnFirst,
     FocusColumnLast,
+    /// Focus the Nth column of the workspace (1-based).
+    FocusColumnIndex(u8),
     FocusWindowDown,
     FocusWindowUp,
     MoveColumnLeft,
@@ -266,7 +268,9 @@ fn bind(combo: &str, action: Action) -> Bind {
 }
 
 impl Config {
-    /// Append niri's numeric workspace binds (Mod+N / Mod+Ctrl+N).
+    /// Append the numeric binds: Mod+N / Mod+Ctrl+N switch and move
+    /// workspaces (niri defaults), and Mod+Shift+N focuses the Nth
+    /// column (our extension; niri has no column-index focus).
     fn with_workspace_binds(mut self) -> Self {
         for n in 1..=9u8 {
             self.binds.push(bind(
@@ -276,6 +280,10 @@ impl Config {
             self.binds.push(bind(
                 &format!("Mod+Ctrl+{n}"),
                 Action::MoveColumnToWorkspace(n),
+            ));
+            self.binds.push(bind(
+                &format!("Mod+Shift+{n}"),
+                Action::FocusColumnIndex(n),
             ));
         }
         self
@@ -634,6 +642,7 @@ fn parse_action(node: &KdlNode) -> Option<Action> {
         "focus-column-right" => Action::FocusColumnRight,
         "focus-column-first" => Action::FocusColumnFirst,
         "focus-column-last" => Action::FocusColumnLast,
+        "focus-column-index" => Action::FocusColumnIndex(first_u8_arg(node).unwrap_or(1)),
         "focus-window-down" => Action::FocusWindowDown,
         "focus-window-up" => Action::FocusWindowUp,
         "move-column-left" => Action::MoveColumnLeft,
@@ -652,13 +661,13 @@ fn parse_action(node: &KdlNode) -> Option<Action> {
         "toggle-window-floating" => Action::ToggleWindowFloating,
         "toggle-overview" => Action::ToggleOverview,
         "focus-workspace" | "workspace-switch" => {
-            Action::FocusWorkspace(arg.and_then(|s| s.parse().ok()).unwrap_or(1))
+            Action::FocusWorkspace(first_u8_arg(node).unwrap_or(1))
         }
         "move-window-to-workspace" => {
-            Action::MoveWindowToWorkspace(arg.and_then(|s| s.parse().ok()).unwrap_or(1))
+            Action::MoveWindowToWorkspace(first_u8_arg(node).unwrap_or(1))
         }
         "move-column-to-workspace" => {
-            Action::MoveColumnToWorkspace(arg.and_then(|s| s.parse().ok()).unwrap_or(1))
+            Action::MoveColumnToWorkspace(first_u8_arg(node).unwrap_or(1))
         }
         other => {
             log::debug!("ignoring unknown action {other:?}");
@@ -697,6 +706,12 @@ fn first_bool_arg(node: &KdlNode) -> Option<bool> {
         .iter()
         .filter(|e| e.name().is_none())
         .find_map(|e| e.value().as_bool())
+}
+
+/// First numeric argument as u8 — KDL stores `focus-column-index 3;`
+/// as an integer, not a string, so `first_string_arg` misses it.
+fn first_u8_arg(node: &KdlNode) -> Option<u8> {
+    first_float_arg(node).map(|f| f.max(0.0) as u8)
 }
 
 #[allow(dead_code)]
@@ -899,6 +914,29 @@ mod tests {
         // Bad colors keep the old value (soft failure).
         let cfg = parse(r##"layout { focus-ring { active-color "nope"; } }"##).unwrap();
         assert_eq!(cfg.focus_ring.active_color, FocusRingConfig::default().active_color);
+    }
+
+    #[test]
+    fn focus_column_index_config() {
+        // Default bind: Mod+Shift+N focuses the Nth column.
+        let cfg = Config::default();
+        assert!(cfg.binds.iter().any(|b| b.combo == "Mod+Shift+3"
+            && b.action == Action::FocusColumnIndex(3)));
+        assert!(cfg.binds.iter().any(|b| b.combo == "Mod+3"
+            && b.action == Action::FocusWorkspace(3)));
+
+        // `focus-column-index 2;` parses (integer arg, not string).
+        let cfg = parse("binds { Mod+M { focus-column-index 2; } }").unwrap();
+        assert!(cfg.binds.iter().any(|b| b.action == Action::FocusColumnIndex(2)));
+
+        // Bare node defaults to 1.
+        let cfg = parse("binds { Mod+M { focus-column-index; } }").unwrap();
+        assert!(cfg.binds.iter().any(|b| b.action == Action::FocusColumnIndex(1)));
+
+        // Integer args work for workspace actions too (KDL ints are
+        // not strings).
+        let cfg = parse("binds { Mod+W { focus-workspace 4; } }").unwrap();
+        assert!(cfg.binds.iter().any(|b| b.action == Action::FocusWorkspace(4)));
     }
 
     #[test]
