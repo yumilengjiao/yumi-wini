@@ -161,6 +161,11 @@ impl AnimatedRect {
             self.h.value().round().max(1.0) as i32,
         )
     }
+
+    /// The target rect (no animation applied).
+    pub fn targets(&self) -> (f64, f64, f64, f64) {
+        (self.x.target(), self.y.target(), self.w.target(), self.h.target())
+    }
 }
 
 /// Tracks all window animations and ticks them.
@@ -219,6 +224,25 @@ impl Animator {
         // Garbage-collect finished animations occasionally.
         self.rects.retain(|_, r| !r.finished());
         out
+    }
+
+    /// Snap every in-flight animation to its target and drop it,
+    /// returning the final rects. Used when management is suspended
+    /// (do-screen-transition): nothing should keep moving mid-pause.
+    pub fn finish_all(&mut self) -> Vec<(isize, i32, i32, i32, i32)> {
+        self.rects
+            .drain()
+            .map(|(id, r)| {
+                let (x, y, w, h) = r.targets();
+                (
+                    id,
+                    x.round() as i32,
+                    y.round() as i32,
+                    w.round().max(1.0) as i32,
+                    h.round().max(1.0) as i32,
+                )
+            })
+            .collect()
     }
 }
 
@@ -290,5 +314,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         assert_eq!(r.value(), (10, 20, 30, 40));
         assert!(r.finished());
+    }
+
+    #[test]
+    fn finish_all_snaps_to_targets() {
+        let mut a = Animator::new(AnimParams {
+            duration: Duration::from_millis(10_000), // never finishes
+            easing: Easing::Linear,
+        });
+        a.set_target(7, 0.0, 0.0, 100.0, 100.0);
+        a.set_target(7, 50.0, 60.0, 70.0, 80.0);
+        assert!(a.is_animating());
+        let finals = a.finish_all();
+        assert_eq!(finals, vec![(7, 50, 60, 70, 80)]);
+        assert!(!a.is_animating());
+        assert!(a.finish_all().is_empty());
     }
 }

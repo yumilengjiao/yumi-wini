@@ -15,8 +15,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, KillTimer, RegisterClassW, SetTimer, SetWindowPos, ShowWindow,
-    HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::win::monitor::Monitor;
@@ -28,6 +29,10 @@ const HIDE_MS: u32 = 1200;
 /// Overlay size.
 const WIDTH: i32 = 280;
 const HEIGHT: i32 = 64;
+/// Screen-transition (do-screen-transition) auto-end timer id.
+const TIMER_TRANSITION: usize = 3;
+/// How long the screen transition covers the monitor.
+const TRANSITION_MS: u32 = 1000;
 
 /// Current label, reached from wnd_proc (single-threaded: main thread).
 struct LabelCell(std::cell::UnsafeCell<String>);
@@ -44,6 +49,30 @@ struct DisplayCell(std::cell::UnsafeCell<Option<DisplayChangeHandler>>);
 unsafe impl Sync for DisplayCell {}
 
 static DISPLAY_HANDLER: DisplayCell = DisplayCell(std::cell::UnsafeCell::new(None));
+
+/// Invoked when a screen transition ends (its cover hides itself on
+/// a timer); the app resumes window management here.
+type TransitionEndHandler = Box<dyn Fn()>;
+struct TransitionCell(std::cell::UnsafeCell<Option<TransitionEndHandler>>);
+unsafe impl Sync for TransitionCell {}
+
+static TRANSITION_END: TransitionCell = TransitionCell(std::cell::UnsafeCell::new(None));
+
+impl TransitionCell {
+    const fn new() -> Self {
+        TransitionCell(std::cell::UnsafeCell::new(None))
+    }
+
+    /// Safety: main thread only.
+    unsafe fn set(&self, handler: TransitionEndHandler) {
+        unsafe { *self.0.get() = Some(handler) }
+    }
+
+    /// Safety: main thread only; must not outlive the next `set`.
+    unsafe fn get(&self) -> Option<&TransitionEndHandler> {
+        unsafe { (*self.0.get()).as_ref() }
+    }
+}
 
 impl DisplayCell {
     const fn new() -> Self {
@@ -92,9 +121,16 @@ impl OverlayWindow {
             };
             let _ = RegisterClassW(&wc);
 
+            // Click-through (WS_EX_TRANSPARENT) so the fullscreen
+            // transition cover never eats clicks; never activates, no
+            // taskbar/alt-tab presence, always on top.
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(
-                    WS_EX_LAYERED.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0,
+                    WS_EX_LAYERED.0
+                        | WS_EX_TOPMOST.0
+                        | WS_EX_TOOLWINDOW.0
+                        | WS_EX_NOACTIVATE.0
+                        | WS_EX_TRANSPARENT.0,
                 ),
                 class_name,
                 w!(""),
@@ -142,12 +178,42 @@ impl OverlayWindow {
         }
     }
 
+    /// Cover `monitor` entirely with a black screen for a moment
+    /// (niri's do-screen-transition: privacy for screenshot tools —
+    /// the WM suspends management for the duration). When the cover
+    /// hides itself, the transition-end handler runs.
+    pub fn show_transition(&self, monitor: &Monitor) {
+        unsafe {
+            LABEL.set(String::new()); // no text, just the black fill
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                monitor.full.left,
+                monitor.full.top,
+                monitor.full.right - monitor.full.left,
+                monitor.full.bottom - monitor.full.top,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+            let _ = KillTimer(Some(self.hwnd), TIMER_HIDE);
+            let _ = SetTimer(Some(self.hwnd), TIMER_TRANSITION, TRANSITION_MS, None);
+        }
+    }
+
     /// Register the handler invoked when the display topology changes
     /// (WM_DISPLAYCHANGE broadcast — only top-level windows get it).
     pub fn set_display_change_handler(&self, handler: impl Fn() + 'static) {
         // Safety: main thread only; wnd_proc runs during dispatch on
         // the main thread.
         unsafe { DISPLAY_HANDLER.set(Box::new(handler)) }
+    }
+
+    /// Register the handler invoked when a screen transition ends
+    /// (the cover window hid itself after TRANSITION_MS).
+    pub fn set_transition_end_handler(&self, handler: impl Fn() + 'static) {
+        // Safety: main thread only, same reasoning as above.
+        unsafe { TRANSITION_END.set(Box::new(handler)) }
     }
 }
 
@@ -176,6 +242,16 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
             let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        return LRESULT(0);
+    }
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_TIMER && wparam.0 == TIMER_TRANSITION {
+        unsafe {
+            let _ = KillTimer(Some(hwnd), TIMER_TRANSITION);
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            if let Some(handler) = TRANSITION_END.get() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
+            }
         }
         return LRESULT(0);
     }

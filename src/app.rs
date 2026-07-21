@@ -77,6 +77,10 @@ struct AppState {
     /// While the user drags/resizes this window, tiling is paused so we
     /// don't fight the user's mouse.
     interacting_window: Option<HWND>,
+    /// Management suspended (do-screen-transition): the screen is
+    /// covered, animations are frozen and no geometry is applied
+    /// until the transition ends.
+    suspended: bool,
     /// Window rect when the current interaction started, used to tell
     /// real drags apart from clicks and accidental nudges.
     interact_start_rect: Option<(f64, f64, f64, f64)>,
@@ -362,7 +366,67 @@ impl AppState {
     /// - wheel events act as niri-style `WheelScroll*` key binds
     ///   (default `Mod+Wheel` moves column focus, scrolling the view),
     /// - moves drive the optional focus-follows-mouse mode.
+    /// Niri's do-screen-transition: suspend management and cover the
+    /// focused window's monitor (fallback: primary) for ~1s — used by
+    /// screenshot workflows so the WM (overlays, in-flight animations)
+    /// neither interferes with the capture nor appears in it.
+    fn begin_screen_transition(&mut self) {
+        if self.overlay.is_none() {
+            log::warn!("do-screen-transition: no overlay window; ignoring");
+            return;
+        }
+        let mon = self
+            .focused
+            .and_then(|h| monitor::monitor_of_window(h, &self.monitors).cloned())
+            .or_else(|| monitor::primary(&self.monitors).cloned());
+        let Some(m) = mon else {
+            log::warn!("do-screen-transition: no monitor to cover; ignoring");
+            return;
+        };
+        self.suspend_management();
+        if let Some(ov) = self.overlay.as_ref() {
+            ov.show_transition(&m);
+        }
+    }
+
+    /// Freeze all management: no reflows, no animation frames, no
+    /// focus changes. In-flight animations snap to their targets so
+    /// nothing is caught moving mid-pause.
+    fn suspend_management(&mut self) {
+        if self.suspended {
+            return;
+        }
+        self.suspended = true;
+        let finals = self.animator.finish_all();
+        if !finals.is_empty() {
+            let tiles: Vec<geometry::TileRect> = finals
+                .into_iter()
+                .map(|(id, x, y, w, h)| geometry::TileRect { id, x, y, w, h })
+                .collect();
+            placement::apply_geometry(&tiles);
+        }
+        if let Some(fb) = self.focus_border.as_ref() {
+            fb.hide();
+        }
+        log::info!("management suspended (screen transition)");
+    }
+
+    /// End a suspension: everything picked up where it left off.
+    fn resume_management(&mut self) {
+        if !self.suspended {
+            return;
+        }
+        self.suspended = false;
+        log::info!("management resumed");
+        self.reflow();
+    }
+
     fn handle_mouse_event(&mut self, ev: input::MouseEvent) {
+        // Wheel binds and focus-follows-mouse are paused during a
+        // screen transition (nothing should steal focus or move).
+        if self.suspended {
+            return;
+        }
         match ev.kind {
             MouseKind::WheelV | MouseKind::WheelH => {
                 let Some(vk) = ev.wheel_vk() else { return };
@@ -434,6 +498,21 @@ impl AppState {
     /// focused window's workspace.
     fn dispatch(&mut self, action: Action) {
         use Action::*;
+        // While management is suspended (screen transition), the
+        // screen is covered and windows must not move: only quit and
+        // restarting the transition make sense.
+        if self.suspended {
+            match action {
+                Quit => unsafe { PostQuitMessage(0) },
+                DoScreenTransition => self.begin_screen_transition(),
+                _ => {}
+            }
+            return;
+        }
+        if matches!(action, DoScreenTransition) {
+            self.begin_screen_transition();
+            return;
+        }
         // Find the device of the focused window (fallback: monitor
         // under the cursor).
         let focused_id = self
@@ -1133,9 +1212,10 @@ impl AppState {
 
     /// Recompute geometry for every monitor's active workspace and push
     /// it to the real windows (animated). Paused while the user is
-    /// dragging or resizing a window.
+    /// dragging or resizing a window, and while management is
+    /// suspended (screen transition).
     fn reflow(&mut self) {
-        if self.interacting_window.is_some() {
+        if self.interacting_window.is_some() || self.suspended {
             return;
         }
         let params = self.params.clone();
@@ -1317,6 +1397,7 @@ impl App {
             config_mtime,
             focused: None,
             interacting_window: None,
+            suspended: false,
             interact_start_rect: None,
             borderless: std::collections::HashSet::new(),
             floating: std::collections::HashMap::new(),
@@ -1402,6 +1483,12 @@ impl App {
             let dc_state = Rc::clone(&state);
             ov.set_display_change_handler(move || {
                 dc_state.borrow_mut().on_display_change();
+            });
+            // Screen transition ended (cover hid itself): resume
+            // window management.
+            let tr_state = Rc::clone(&state);
+            ov.set_transition_end_handler(move || {
+                tr_state.borrow_mut().resume_management();
             });
         }
         // Compile the combo table for hook-side swallowing.

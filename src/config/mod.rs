@@ -92,6 +92,9 @@ pub enum Action {
     MoveColumnToWorkspace(u8),
     ToggleWindowFloating,
     ToggleOverview,
+    /// Niri's do-screen-transition: cover the screen briefly while
+    /// management is suspended (screenshot privacy).
+    DoScreenTransition,
     Unknown(String),
 }
 
@@ -660,6 +663,7 @@ fn parse_action(node: &KdlNode) -> Option<Action> {
         "toggle-windowed-fullscreen" => Action::ToggleWindowedFullscreen,
         "toggle-window-floating" => Action::ToggleWindowFloating,
         "toggle-overview" => Action::ToggleOverview,
+        "do-screen-transition" => Action::DoScreenTransition,
         "focus-workspace" | "workspace-switch" => {
             Action::FocusWorkspace(first_u8_arg(node).unwrap_or(1))
         }
@@ -937,6 +941,21 @@ mod tests {
         // not strings).
         let cfg = parse("binds { Mod+W { focus-workspace 4; } }").unwrap();
         assert!(cfg.binds.iter().any(|b| b.action == Action::FocusWorkspace(4)));
+    }
+
+    #[test]
+    fn do_screen_transition_config() {
+        // Parses as an action; not bound by default (niri doesn't bind
+        // it either — users wire it to their screenshot tool).
+        let cfg = parse("binds { Mod+P { do-screen-transition; } }").unwrap();
+        assert!(cfg
+            .binds
+            .iter()
+            .any(|b| b.action == Action::DoScreenTransition));
+        assert!(!Config::default()
+            .binds
+            .iter()
+            .any(|b| b.action == Action::DoScreenTransition));
     }
 
     #[test]
