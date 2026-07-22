@@ -1337,8 +1337,10 @@ impl AppState {
 
 pub struct App {
     state: Rc<RefCell<AppState>>,
-    /// Keeps the WinEvent hooks alive; dropping uninstalls them.
-    _hooks: EventHooks,
+    /// Keeps the WinEvent hooks alive; dropping uninstalls them. Taken
+    /// during shutdown so no tracking callbacks fire while we restore
+    /// windows.
+    _hooks: Option<EventHooks>,
     /// Hidden message-only window; receives marshaled key events.
     /// Kept alive for the process lifetime (field is deliberately
     /// unused after construction).
@@ -1503,7 +1505,7 @@ impl App {
 
         Ok(App {
             state,
-            _hooks: hooks,
+            _hooks: Some(hooks),
             msg_window,
         })
     }
@@ -1537,9 +1539,33 @@ impl App {
             state.windows.len()
         );
         drop(state);
-        // Leave the desktop as we found it.
-        self.state.borrow_mut().restore_all();
+
+        // --- graceful shutdown, in a deliberate order -------------
+        //
+        // 1. Input hooks first: no key/mouse event can mutate state
+        //    (or get swallowed) while we tear down.
         input::uninstall();
+        // 2. WinEvent hooks next: our own restore mutations must not
+        //    trigger tracking callbacks that would fight the restore.
+        if let Some(hooks) = self._hooks.take() {
+            drop(hooks);
+        }
+        // 3. Destroy our overlay windows before touching real ones —
+        //    the workspace pill / focus ring / transition cover would
+        //    otherwise sit on top of the restored desktop.
+        {
+            let mut s = self.state.borrow_mut();
+            if let Some(ov) = s.overlay.take() {
+                drop(ov);
+            }
+            if let Some(fb) = s.focus_border.take() {
+                drop(fb);
+            }
+        }
+        // 4. Leave the desktop as we found it: decorations, geometry
+        //    and visibility of every window we ever managed.
+        self.state.borrow_mut().restore_all();
+        log::info!("shutdown complete; goodbye");
         Ok(())
     }
 }
