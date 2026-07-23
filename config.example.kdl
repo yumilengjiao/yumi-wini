@@ -1,0 +1,113 @@
+// yumi-wini example configuration.
+//
+// Copy to %APPDATA%\yumi-wini\config.kdl and edit. Everything here is
+// optional — a missing file means the defaults, and hot reload picks
+// up changes within a second (parse errors keep the last good config).
+//
+// Full reference: docs/CONFIG.md
+
+input {
+    // Hovering a window focuses it.
+    // focus-follows-mouse
+
+    keyboard-shortcuts {
+        // "Alt" (default) | "Super" (Windows key) | "Ctrl"
+        Mod "Alt"
+    }
+}
+
+layout {
+    gaps 8
+    edge-padding 8
+
+    // "never" | "on-overflow" (default) | "always"
+    center-focused-column "on-overflow"
+
+    // Width for new columns: proportion of the monitor or fixed pixels.
+    default-column-width { proportion 0.25; }
+
+    // Cycled through by a bare `set-column-width;` action.
+    preset-column-widths {
+        proportion 0.33
+        proportion 0.5
+        fixed 1280
+    }
+
+    focus-ring {
+        width 4
+        active-color "#7daea3"
+        // off
+    }
+}
+
+animations {
+    window-movement { duration-ms 250; easing "ease-out-cubic"; }
+    window-open    { duration-ms 150; easing "ease-out-cubic"; }
+    view-offset    { duration-ms 250; easing "ease-out-expo"; }
+    // off
+}
+
+// Rules for newly opened windows; first match wins. `match` values
+// are case-insensitive substrings; app-id == the exe name.
+window-rule {
+    match app-id="firefox" title="download"
+    open-floating
+}
+window-rule {
+    match exe="notepad.exe"
+    open-on-workspace 2
+    open-maximized
+}
+
+// Startup commands, in order.
+spawn-at-startup "alacritty"
+
+// A binds section replaces ALL default binds — copy the defaults from
+// README.md if you only want to add one. Shown here: the numeric
+// extras on top of the default set.
+binds {
+    // Navigation
+    Mod+H     { focus-column-left; }
+    Mod+L     { focus-column-right; }
+    Mod+J     { focus-window-down; }
+    Mod+K     { focus-window-up; }
+    Mod+Home  { focus-column-first; }
+    Mod+End   { focus-column-last; }
+
+    // Reordering
+    Mod+Shift+H { move-column-left; }
+    Mod+Shift+L { move-column-right; }
+    Mod+Shift+J { move-window-down; }
+    Mod+Shift+K { move-window-up; }
+    Mod+Ctrl+H  { move-window-to-column-left; }
+    Mod+Ctrl+L  { move-window-to-column-right; }
+    Mod+Ctrl+J  { consume-or-expel-window-left; }
+    Mod+Ctrl+K  { consume-or-expel-window-right; }
+
+    // Sizing
+    Mod+Minus { set-column-width "-100"; }
+    Mod+Equal { set-column-width "+100"; }
+    // Bare set-column-width cycles the preset-column-widths.
+    Mod+W     { set-column-width; }
+    Mod+Shift+W { set-window-height "+100"; }
+    Mod+F     { maximize-column; }
+    Mod+Shift+F { toggle-windowed-fullscreen; }
+
+    // Workspaces / overview / windows
+    Mod+V       { toggle-window-floating; }
+    Mod+Q       { close-window; }
+    Mod+Shift+Slash { toggle-overview; }
+    Mod+P       { do-screen-transition; }
+
+    Mod+Shift+E { quit; }
+
+    // Numeric keys (also part of the defaults):
+    //   Mod+N        -> focus workspace N
+    //   Mod+Ctrl+N   -> move column to workspace N
+    //   Mod+Shift+N  -> focus the Nth column
+    Mod+1 { focus-workspace 1; }
+    Mod+2 { focus-workspace 2; }
+    Mod+3 { focus-workspace 3; }
+    Mod+Shift+1 { focus-column-index 1; }
+    Mod+Shift+2 { focus-column-index 2; }
+}

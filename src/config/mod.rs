@@ -959,6 +959,91 @@ mod tests {
     }
 
     #[test]
+    fn example_config_parses() {
+        // The shipped example must stay valid against the real parser.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config.example.kdl");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            panic!("missing config.example.kdl next to Cargo.toml");
+        };
+        let cfg = parse(&src).expect("config.example.kdl must parse");
+        assert!(!cfg.binds.is_empty());
+        assert_eq!(cfg.window_rules.len(), 2);
+        assert_eq!(cfg.spawn_at_startup, vec!["alacritty"]);
+        assert_eq!(cfg.layout.preset_column_widths.len(), 3);
+    }
+
+
+    /// The snippets in docs/CONFIG.md and config.example.kdl must keep
+    /// parsing (guards against both doc drift and KDL dialect traps).
+    #[test]
+    fn doc_snippets_parse() {
+        let snippets: Vec<(&str, &str)> = vec![        ("focus-ring", r##"layout {
+    focus-ring {
+        // off
+        width 4               // thickness
+        active-color "#7daea3"
+    }
+}
+"##),
+        ("animations", r##"animations {
+    window-movement { duration-ms 250; easing "ease-out-cubic"; }
+    window-open    { duration-ms 150; easing "ease-out-cubic"; }
+    view-offset    { duration-ms 250; easing "ease-out-expo"; }
+}
+"##),
+        ("input", r##"input {
+    focus-follows-mouse
+    keyboard-shortcuts {
+        Mod "Alt"
+    }
+}
+"##),
+        ("layout", r##"layout {
+    gaps 8
+    edge-padding 8
+    center-focused-column "on-overflow"
+    default-column-width { proportion 0.25; }
+    preset-column-widths {
+        proportion 0.33
+        proportion 0.5
+        fixed 1280
+    }
+}
+"##),
+        ("window-rule", r##"window-rule {
+    match app-id="firefox" title="download"
+    open-floating
+}
+"##),
+        ];
+        for (name, doc) in snippets {
+            if let Err(e) = doc.parse::<KdlDocument>() {
+                panic!("snippet {name} fails: {e}");
+            }
+        }
+    }
+
+    /// kdl 6.x quirk we must not trip in docs/examples: a comment on
+    /// the same line after a child block's `}` breaks parsing of the
+    /// sibling nodes that follow. Keep trailing comments off `}` lines.
+    #[test]
+    fn trailing_comment_after_child_block() {
+        assert!("binds {
+    a { b; } // c
+    d { e; }
+}"
+            .parse::<KdlDocument>()
+            .is_err());
+        assert!("binds {
+    a { b; }
+    d { e; }
+}"
+            .parse::<KdlDocument>()
+            .is_ok());
+    }
+
+    #[test]
     fn proportion_clamped() {
         let cfg = parse("layout { default-column-width { proportion 5000; } }").unwrap();
         assert_eq!(cfg.layout.default_column_width, ColumnWidth::Proportion(100.0));
