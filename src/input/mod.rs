@@ -97,9 +97,7 @@ impl KeyEvent {
             _ => {
                 // Letters/digits: their ASCII name.
                 let c = vk as u8;
-                if c.is_ascii_uppercase() {
-                    (c as char).to_string()
-                } else if c.is_ascii_digit() {
+                if c.is_ascii_alphanumeric() {
                     (c as char).to_string()
                 } else {
                     format!("VK_{vk:02X}")

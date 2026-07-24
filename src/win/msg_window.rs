@@ -242,7 +242,7 @@ extern "system" fn wnd_proc(
         unsafe {
             if let Some(handler) = TIMER_HANDLER.get(wparam.0) {
                 let _ =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
                 return LRESULT(0);
             }
         }

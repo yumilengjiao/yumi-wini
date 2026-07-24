@@ -262,7 +262,7 @@ mod tests {
             assert!((e.apply(0.0) - 0.0).abs() < 1e-9, "{e:?} at 0");
             assert!((e.apply(1.0) - 1.0).abs() < 1e-9, "{e:?} at 1");
             let mid = e.apply(0.5);
-            assert!(mid >= -0.5 && mid <= 1.5, "{e:?} mid sane: {mid}");
+            assert!((-0.5..=1.5).contains(&mid), "{e:?} mid sane: {mid}");
         }
     }
 
@@ -284,7 +284,7 @@ mod tests {
         // 1-(0.5)^3 = 0.875 -> value 87.5. We can't sleep mid-test
         // reliably, so just check bounds instead.
         let val = v.value();
-        assert!(val >= 0.0 && val <= 100.0);
+        assert!((0.0..=100.0).contains(&val));
     }
 
     #[test]

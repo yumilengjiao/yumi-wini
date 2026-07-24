@@ -113,8 +113,10 @@ impl Drop for EventHooks {
     }
 }
 
+type WinEventHandler = Box<dyn FnMut(WinEvent)>;
+
 thread_local! {
-    static HANDLER: std::cell::RefCell<Option<Box<dyn FnMut(WinEvent)>>> =
+    static HANDLER: std::cell::RefCell<Option<WinEventHandler>> =
         const { std::cell::RefCell::new(None) };
 }
 

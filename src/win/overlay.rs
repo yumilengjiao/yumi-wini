@@ -233,7 +233,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         // it, during message dispatch.
         unsafe {
             if let Some(handler) = DISPLAY_HANDLER.get() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
             }
         }
         return LRESULT(0);
@@ -250,7 +250,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             let _ = KillTimer(Some(hwnd), TIMER_TRANSITION);
             let _ = ShowWindow(hwnd, SW_HIDE);
             if let Some(handler) = TRANSITION_END.get() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler()));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
             }
         }
         return LRESULT(0);

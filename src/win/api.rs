@@ -113,7 +113,7 @@ pub fn window_exe(hwnd: HWND) -> String {
 
 /// Wrapper for `GetWindowLongPtrW` with the given index.
 pub fn get_window_long_ptr(hwnd: HWND, index: i32) -> isize {
-    unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(index)) as isize }
+    unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(index)) }
 }
 
 /// True while the HWND is still a valid window.

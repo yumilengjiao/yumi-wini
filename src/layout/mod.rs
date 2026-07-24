@@ -214,11 +214,6 @@ impl Workspace {
         self.active_column_idx = column_idx;
     }
 
-    /// Remove a window. Fixes up focus indices following niri's rules:
-    /// - removing the focused column moves focus to the left neighbor
-    ///   (or the prev-active column for a freshly created column),
-    /// - removing a tile from the focused column keeps tile focus in
-    ///   place (clamped).
     /// Niri's `toggle-windowed-fullscreen`: the focused window is
     /// rendered covering the whole monitor (applied by the caller's
     /// geometry stage); the layout structure stays intact so toggling
@@ -243,6 +238,11 @@ impl Workspace {
         true
     }
 
+    /// Remove a window. Fixes up focus indices following niri's rules:
+    /// - removing the focused column moves focus to the left neighbor
+    ///   (or the prev-active column for a freshly created column),
+    /// - removing a tile from the focused column keeps tile focus in
+    ///   place (clamped).
     pub fn remove_window(&mut self, id: WindowId) -> bool {
         let Some((ci, ti)) = self.find(id) else {
             return false;
@@ -399,7 +399,7 @@ impl Workspace {
                 self.columns[ci].active_tile_idx.min(self.columns[ci].tiles.len() - 1);
         }
 
-        if self.columns[ni].tiles.len() >= 1 {
+        if !self.columns[ni].tiles.is_empty() {
             // Insert into the neighbor column.
             let at = if dir == DirH::Left {
                 self.columns[ni].tiles.len()

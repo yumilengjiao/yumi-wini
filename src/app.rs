@@ -212,8 +212,8 @@ impl AppState {
 
         // open-floating: keep the window at its current position,
         // outside the tiling grid.
-        if rule.as_ref().is_some_and(|r| r.open_floating) {
-            if let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
+        if rule.as_ref().is_some_and(|r| r.open_floating)
+            && let Some((x, y, w, h)) = crate::win::api::window_rect(hwnd) {
                 let ws_idx = self
                     .layout
                     .monitor(&device)
@@ -233,7 +233,6 @@ impl AppState {
                 log::debug!("window-rule: {id} opens floating");
                 return;
             }
-        }
 
         match rule.as_ref().and_then(|r| r.open_workspace) {
             Some(n) => {
@@ -249,8 +248,8 @@ impl AppState {
         }
 
         // open-maximized / open-fullscreen: flag the new column/window.
-        if let Some(r) = rule {
-            if let Some(ml) = self.layout.monitor_mut(&device)
+        if let Some(r) = rule
+            && let Some(ml) = self.layout.monitor_mut(&device)
                 && let Some((ci, _)) = ml.active_workspace().find(id)
             {
                 if r.open_maximized {
@@ -262,7 +261,6 @@ impl AppState {
                     ml.active_workspace_mut().fullscreen_id = Some(id);
                 }
             }
-        }
         log::debug!(
             "layout: window {id} -> monitor {device}, column {}",
             self.layout
@@ -362,10 +360,6 @@ impl AppState {
         true
     }
 
-    /// Handle a mouse event forwarded by the low-level hook:
-    /// - wheel events act as niri-style `WheelScroll*` key binds
-    ///   (default `Mod+Wheel` moves column focus, scrolling the view),
-    /// - moves drive the optional focus-follows-mouse mode.
     /// Niri's do-screen-transition: suspend management and cover the
     /// focused window's monitor (fallback: primary) for ~1s — used by
     /// screenshot workflows so the WM (overlays, in-flight animations)
@@ -421,6 +415,10 @@ impl AppState {
         self.reflow();
     }
 
+    /// Handle a mouse event forwarded by the low-level hook:
+    /// - wheel events act as niri-style `WheelScroll*` key binds
+    ///   (default `Mod+Wheel` moves column focus, scrolling the view),
+    /// - moves drive the optional focus-follows-mouse mode.
     fn handle_mouse_event(&mut self, ev: input::MouseEvent) {
         // Wheel binds and focus-follows-mouse are paused during a
         // screen transition (nothing should steal focus or move).
@@ -602,8 +600,8 @@ impl AppState {
                     _ => {}
                 }
                 // Keep at least 100 px of the float on its monitor.
-                if touched {
-                    if let Some(m) = self.monitors.iter().find(|m| m.device == fs.device) {
+                if touched
+                    && let Some(m) = self.monitors.iter().find(|m| m.device == fs.device) {
                         fs.x = fs
                             .x
                             .clamp(m.work.left as f64 - fs.w + 100.0, m.work.right as f64 - 100.0);
@@ -611,7 +609,6 @@ impl AppState {
                             .y
                             .clamp(m.work.top as f64 - fs.h + 100.0, m.work.bottom as f64 - 100.0);
                     }
-                }
             }
             if touched {
                 self.reflow();

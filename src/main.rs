@@ -18,7 +18,11 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     logging::init();
 
-    log::info!("yumi-wini starting (pid {})", std::process::id());
+    log::info!(
+        "yumi-wini v{} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
 
     match app::App::new() {
         Ok(mut app) => {
